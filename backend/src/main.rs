@@ -301,6 +301,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/files/copy", post(handlers::copy_files))
         .route("/files/move", post(handlers::move_files))
         .route("/files/rename", post(handlers::rename_file))
+        // 跨账号复制 / 移动
+        .route(
+            "/cross-account/jobs",
+            post(handlers::cross_account::create_cross_account_job)
+                .get(handlers::cross_account::list_cross_account_jobs),
+        )
+        .route(
+            "/cross-account/jobs/:id",
+            get(handlers::cross_account::get_cross_account_job),
+        )
         // 下载API
         .route("/downloads", post(handlers::create_download))
         .route("/downloads", get(handlers::get_all_downloads))
@@ -343,6 +353,8 @@ async fn main() -> anyhow::Result<()> {
             "/downloads/folder/:id",
             delete(handlers::cancel_folder_download),
         )
+        // 上传/下载进度摘要（菜单进度轮询）
+        .route("/tasks/summary", get(handlers::get_tasks_summary))
         // 上传API
         .route("/uploads", post(handlers::create_upload))
         .route("/uploads", get(handlers::get_all_uploads))
@@ -477,6 +489,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/shares/:id", get(handlers::get_share_detail))
         // 🔥 系统能力检测 API
         .route("/system/watch-capability", get(handlers::autobackup::get_watch_capability))
+        .route(
+            "/system/open-folder",
+            get(handlers::system::get_open_folder_capability)
+                .post(handlers::system::open_local_folder),
+        )
         // 🔥 自动备份全局触发配置 API
         .route("/config/autobackup/trigger", get(handlers::autobackup::get_trigger_config))
         .route("/config/autobackup/trigger", put(handlers::autobackup::update_trigger_config))
@@ -494,20 +511,8 @@ async fn main() -> anyhow::Result<()> {
             web_auth::web_auth_middleware,
         ));
 
-    // 🔥 Web 访问认证 API 路由（使用独立的 WebAuthState）
-    let web_auth_routes = Router::new()
-        .route("/login", post(web_auth::login))
-        .route("/refresh", post(web_auth::refresh))
-        .route("/logout", post(web_auth::logout))
-        .route("/status", get(web_auth::status))
-        .route("/config", get(web_auth::get_config))
-        .route("/config", put(web_auth::update_config))
-        .route("/password/set", post(web_auth::set_password))
-        .route("/totp/setup", post(web_auth::totp_setup))
-        .route("/totp/verify", post(web_auth::totp_verify))
-        .route("/totp/disable", post(web_auth::totp_disable))
-        .route("/recovery-codes/regenerate", post(web_auth::regenerate_recovery_codes))
-        .with_state(web_auth_state.clone());
+    // 🔥 Web 访问认证 API 路由（使用独立的 WebAuthState；配置类接口需登录，见 web_auth::routes）
+    let web_auth_routes = web_auth::web_auth_routes(web_auth_state.clone());
 
     // 自动检测前端资源目录
     let frontend_dir = detect_frontend_dir();
@@ -542,6 +547,18 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("ClientPool 预热出现非致命错误: {}", e);
     }
 
+    // 会员成长等级刷新：启动后一次，之后每 6 小时一次
+    {
+        let state = app_state.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+            loop {
+                ticker.tick().await;
+                state.refresh_vip_levels().await;
+            }
+        });
+    }
+
     // 构建完整应用
     let app = Router::new()
         .nest("/api/v1", api_routes)
@@ -561,7 +578,11 @@ async fn main() -> anyhow::Result<()> {
     info!("前端页面: http://{}/", addr);
 
     // 🔥 使用 select! 监听关闭信号，支持优雅关闭
-    let server = axum::serve(listener, app);
+    // 携带对端地址：本机打开文件夹等接口需判断请求是否来自 loopback
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    );
 
     tokio::select! {
         result = server => {

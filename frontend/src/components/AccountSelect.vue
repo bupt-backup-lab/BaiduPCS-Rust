@@ -19,7 +19,7 @@
       </span>
     </el-option>
     <el-option
-        v-for="acc in authStore.accounts"
+        v-for="acc in options"
         :key="acc.uid"
         :value="acc.uid"
         :label="optionLabel(acc)"
@@ -49,15 +49,18 @@
  *   - `null` 在 includeAll=true 场景下表示 "全部账号"
  *   - 在创建场景（includeAll=false）由父组件做必填校验
  */
+import { computed } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { User } from '@element-plus/icons-vue'
 import type { AccountSummary } from '@/api/accounts'
 
-withDefaults(
+const props = withDefaults(
     defineProps<{
       modelValue: number | null
       /** 是否包含 "全部账号" 选项（默认 false） */
       includeAll?: boolean
+      /** 不出现在选项中的账号（如跨账号复制时排除源账号） */
+      excludeUids?: number[]
       placeholder?: string
       clearable?: boolean
       disabled?: boolean
@@ -65,6 +68,7 @@ withDefaults(
     }>(),
     {
       includeAll: false,
+      excludeUids: () => [],
       placeholder: '请选择账号',
       clearable: false,
       disabled: false,
@@ -78,6 +82,10 @@ const emit = defineEmits<{
 }>()
 
 const authStore = useAuthStore()
+
+const options = computed(() =>
+    authStore.accounts.filter((acc) => !props.excludeUids.includes(acc.uid)),
+)
 
 function optionLabel(acc: AccountSummary): string {
   return acc.nickname || acc.username || `UID:${acc.uid}`

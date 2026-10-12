@@ -587,13 +587,19 @@ pub struct ShareRecord {
     #[serde(rename = "typicalPath", default)]
     pub typical_path: String,
 
-    /// 过期类型（0=永久, 1=1天, 7=7天, 30=30天）
+    /// 过期状态（-1=已过期, 0=有期限且未过期, 1=永久有效）
+    ///
+    /// 注意：这不是有效天数，原始有效天数见 `oriExpiredType`
     #[serde(rename = "expiredType", default)]
     pub expired_type: i32,
 
-    /// 过期时间戳（0表示永久）
+    /// 剩余有效秒数（不是时间戳；永久或已过期时为 0）
     #[serde(rename = "expiredTime", default)]
     pub expired_time: i64,
+
+    /// 过期时间点（Unix 秒级时间戳；永久或已过期时为 0）
+    #[serde(rename = "lastExpireTime", default)]
+    pub last_expire_time: i64,
 
     /// 浏览次数
     #[serde(rename = "vCnt", default)]
@@ -606,9 +612,29 @@ impl ShareRecord {
         self.status == 0
     }
 
+    /// 是否已过期
+    pub fn is_expired(&self) -> bool {
+        self.expired_type == -1
+    }
+
     /// 是否永久有效
     pub fn is_permanent(&self) -> bool {
-        self.expired_type == 0 || self.expired_time == 0
+        !self.is_expired() && self.expire_at(0) == 0
+    }
+
+    /// 过期时间点（Unix 秒级时间戳），0 表示永久或已过期
+    ///
+    /// 优先使用 `lastExpireTime`；缺失时用 `now + 剩余秒数` 推算
+    pub fn expire_at(&self, now: i64) -> i64 {
+        if self.is_expired() {
+            0
+        } else if self.last_expire_time > 0 {
+            self.last_expire_time
+        } else if self.expired_time > 0 {
+            now + self.expired_time
+        } else {
+            0
+        }
     }
 
     /// 获取文件名（从路径中提取）
@@ -936,6 +962,44 @@ pub struct FileOperationItem {
     pub newname: String,
 }
 
+/// `filemanager` 接口 copy/move 时目标已存在同名项的处理策略（百度 `ondup` 参数）
+///
+/// 实测（web 版 `api/filemanager`，async=2）：
+/// - `ondup` 必须写在 `filelist` 的**每一项**里；放在表单或 URL 上时 `overwrite` 不生效
+/// - 默认（`fail`）按项独立处理：不冲突的照常完成，冲突项原样保留，任务以
+///   `task_errno=-30` 失败，`list` 中逐项给出 `error_code=-8`
+/// - `newcopy`：新的一份自动改名为 `x(1).txt` / `dir(1)`
+/// - `overwrite`：同名文件被替换；同名**文件夹被整个替换而不是合并**
+/// - `skip` 不被识别，表现与 `fail` 相同，故不提供（「跳过」= 默认提交后不再处理冲突项）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnDup {
+    /// 报错（百度默认行为）
+    Fail,
+    /// 保留两者：百度自动给新的一份改名
+    Newcopy,
+    /// 覆盖目标
+    Overwrite,
+}
+
+impl OnDup {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OnDup::Fail => "fail",
+            OnDup::Newcopy => "newcopy",
+            OnDup::Overwrite => "overwrite",
+        }
+    }
+}
+
+/// 发送给百度的 copy/move filelist 单项：`FileOperationItem` + 逐项 `ondup`
+#[derive(Debug, Serialize)]
+pub struct FileOperationItemWithOnDup<'a> {
+    #[serde(flatten)]
+    pub item: &'a FileOperationItem,
+    pub ondup: OnDup,
+}
+
 /// `filemanager` 接口 `opera=rename` 时 `filelist` JSON 数组中的单条 item
 ///
 /// 百度协议形如：`[{"path":"/a/x.mp4","newname":"y.mp4","id":123456789}]`
@@ -960,6 +1024,61 @@ pub struct FileOperationResultItem {
     /// 目标路径
     #[serde(default)]
     pub to: String,
+}
+
+/// `share/taskquery` 返回 `list` 中的原始单项
+///
+/// 成功时只有 `from` / `to`；失败时额外带 `error_code`（-8 = 目标已存在同名项）
+/// 与 `from_meta` / `to_meta`。
+#[derive(Debug, Clone, Deserialize)]
+pub struct FileManagerTaskListEntry {
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub to: String,
+    #[serde(default)]
+    pub error_code: i32,
+    #[serde(default)]
+    pub from_meta: Option<FileManagerTaskEntryMeta>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FileManagerTaskEntryMeta {
+    #[serde(default, deserialize_with = "deserialize_u64_flexible")]
+    pub isdir: u64,
+}
+
+/// 失败任务中的单项失败明细
+#[derive(Debug, Clone, Serialize)]
+pub struct FileOperationFailedItem {
+    /// 源路径
+    pub from: String,
+    /// 目标路径
+    pub to: String,
+    /// 百度逐项错误码（-8 = 目标已存在同名项）
+    pub error_code: i32,
+    /// 源是否为文件夹
+    pub isdir: bool,
+}
+
+impl From<FileManagerTaskListEntry> for FileOperationResultItem {
+    fn from(e: FileManagerTaskListEntry) -> Self {
+        Self {
+            from: e.from,
+            to: e.to,
+        }
+    }
+}
+
+impl From<FileManagerTaskListEntry> for FileOperationFailedItem {
+    fn from(e: FileManagerTaskListEntry) -> Self {
+        Self {
+            isdir: e.from_meta.map(|m| m.isdir == 1).unwrap_or(false),
+            from: e.from,
+            to: e.to,
+            error_code: e.error_code,
+        }
+    }
 }
 
 /// `filemanager` 接口同步返回（POST 后立即得到）的响应体
@@ -1003,9 +1122,9 @@ pub struct FileManagerTaskQueryResponse {
     /// 0..100，仅 running 时有意义；百度此字段在不同版本可能为 number 或 string，故用 Value 接住
     #[serde(default)]
     pub progress: serde_json::Value,
-    /// 完成时返回 from/to 列表
+    /// 完成时为 from/to 列表；失败时为逐项失败明细（带 error_code）
     #[serde(default)]
-    pub list: Vec<FileOperationResultItem>,
+    pub list: Vec<FileManagerTaskListEntry>,
     /// 完成项总数
     #[serde(default)]
     pub total: u32,
@@ -1058,6 +1177,9 @@ pub struct FileOperationErrorPayload {
     /// 60 次轮询仍未完成（仅 taskquery 阶段使用）
     #[serde(default)]
     pub still_running: bool,
+    /// taskquery `status="failed"` 时的逐项失败明细；未列出的项已成功处理
+    #[serde(default)]
+    pub failed_items: Vec<FileOperationFailedItem>,
 }
 
 /// 文件管理操作的统一内部 enum
@@ -1072,4 +1194,43 @@ pub enum FileOperationOutcome {
         message: String,
         payload: FileOperationErrorPayload,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(json: &str) -> ShareRecord {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn share_record_expiry_uses_baidu_semantics() {
+        // 7 天有效期：expiredTime 是剩余秒数，lastExpireTime 才是过期时间点
+        let timed = record(
+            r#"{"shareId":1,"status":0,"public":0,"expiredType":0,"expiredTime":604797,"lastExpireTime":1792397064,"oriExpiredType":7}"#,
+        );
+        assert!(!timed.is_expired());
+        assert!(!timed.is_permanent());
+        assert_eq!(timed.expire_at(1791792267), 1792397064);
+
+        // 缺少 lastExpireTime 时按剩余秒数推算
+        let timed_no_last = record(
+            r#"{"shareId":2,"status":0,"public":0,"expiredType":0,"expiredTime":604797}"#,
+        );
+        assert_eq!(timed_no_last.expire_at(1000), 1000 + 604797);
+
+        let permanent = record(
+            r#"{"shareId":3,"status":0,"public":0,"expiredType":1,"expiredTime":0,"lastExpireTime":0,"oriExpiredType":0}"#,
+        );
+        assert!(permanent.is_permanent());
+        assert_eq!(permanent.expire_at(1000), 0);
+
+        let expired = record(
+            r#"{"shareId":4,"status":0,"public":0,"expiredType":-1,"expiredTime":0,"lastExpireTime":0,"oriExpiredType":7}"#,
+        );
+        assert!(expired.is_expired());
+        assert!(!expired.is_permanent());
+        assert_eq!(expired.expire_at(1000), 0);
+    }
 }

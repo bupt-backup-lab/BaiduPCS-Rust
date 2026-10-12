@@ -1,6 +1,9 @@
 // 认证API处理器
 
-use crate::auth::{CookieLoginAuth, CookieLoginApiRequest, QRCode, QRCodeStatus, Uid, UserAuth};
+use crate::auth::{
+    CookieLoginAuth, CookieLoginApiRequest, PublicUserInfo, QRCode, QRCodeStatus,
+    QRCodeStatusResponse, Uid, UserAuth,
+};
 use crate::common::ProxyType;
 use crate::server::{broadcast_account_list_changed, set_active_uid, AppState};
 use crate::transfer::TransferManager;
@@ -95,7 +98,7 @@ pub struct QRCodeStatusQuery {
 pub async fn qrcode_status(
     State(state): State<AppState>,
     Query(params): Query<QRCodeStatusQuery>,
-) -> Result<Json<ApiResponse<QRCodeStatus>>, StatusCode> {
+) -> Result<Json<ApiResponse<QRCodeStatusResponse>>, StatusCode> {
     info!("API: 查询扫码状态: sign={}", params.sign);
 
     // 防呆：检查是否已有有效的活跃账号会话
@@ -125,10 +128,9 @@ pub async fn qrcode_status(
                         }
                     }
 
-                    // 直接返回 Success 状态，token 使用 BDUSS
-                    return Ok(Json(ApiResponse::success(QRCodeStatus::Success {
-                        user: user.clone(),
-                        token: user.bduss.clone(),
+                    // 直接返回 Success 状态（脱敏，不回传凭证）
+                    return Ok(Json(ApiResponse::success(QRCodeStatusResponse::Success {
+                        user: PublicUserInfo::from(&user),
                     })));
                 }
                 Ok(false) => {
@@ -157,7 +159,7 @@ pub async fn qrcode_status(
                 // 先保存基本会话信息
                 if let Err(e) = session.save_session(user).await {
                     error!("❌ 保存会话失败: {}", e);
-                    return Ok(Json(ApiResponse::success(status)));
+                    return Ok(Json(ApiResponse::success((&status).into())));
                 }
 
                 info!(
@@ -192,7 +194,7 @@ pub async fn qrcode_status(
                     Ok(c) => c,
                     Err(e) => {
                         error!("初始化网盘客户端失败: {}", e);
-                        return Ok(Json(ApiResponse::success(status)));
+                        return Ok(Json(ApiResponse::success((&status).into())));
                     }
                 };
 
@@ -508,7 +510,7 @@ pub async fn qrcode_status(
                 }
             }
 
-            Ok(Json(ApiResponse::success(status)))
+            Ok(Json(ApiResponse::success((&status).into())))
         }
         Err(e) => {
             error!("查询扫码状态失败: {}", e);
@@ -526,6 +528,7 @@ pub async fn qrcode_status(
 ///
 /// 从 `active_uid → AccountManager.get_user` 取，符合运行时真源原则。
 /// 多账号场景下返回的就是当前 active_uid 对应的账号。
+/// 只返回脱敏信息（`PublicUserInfo`），凭证不出后端。
 pub async fn get_current_user(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -565,7 +568,7 @@ pub async fn get_current_user(
                 }
             }
 
-            Ok(Json(ApiResponse::success(user)))
+            Ok(Json(ApiResponse::success(PublicUserInfo::from(&user))))
         }
         Ok(false) => {
             // BDUSS 已失效。这里只标记 401，账号删除/切换由调用方按需触发。
@@ -578,7 +581,7 @@ pub async fn get_current_user(
         Err(e) => {
             // 验证失败（可能是网络问题），暂时允许通过
             warn!("BDUSS 验证失败: {}，暂时允许通过", e);
-            Ok(Json(ApiResponse::success(user)))
+            Ok(Json(ApiResponse::success(PublicUserInfo::from(&user))))
         }
     }
 }
@@ -645,7 +648,7 @@ pub async fn cookie_login(
     info!("API: Cookie 登录");
 
     if req.cookies.trim().is_empty() {
-        return Ok(Json(ApiResponse::<crate::auth::UserAuth>::error(
+        return Ok(Json(ApiResponse::<PublicUserInfo>::error(
             400,
             "cookies 字段不能为空".to_string(),
         )));
@@ -666,7 +669,7 @@ pub async fn cookie_login(
         Ok(a) => a,
         Err(e) => {
             error!("创建 Cookie 登录客户端失败: {}", e);
-            return Ok(Json(ApiResponse::<crate::auth::UserAuth>::error(
+            return Ok(Json(ApiResponse::<PublicUserInfo>::error(
                 500,
                 format!("创建客户端失败: {}", e),
             )));
@@ -678,7 +681,7 @@ pub async fn cookie_login(
         Ok(u) => u,
         Err(e) => {
             error!("Cookie 登录失败: {}", e);
-            return Ok(Json(ApiResponse::<crate::auth::UserAuth>::error(
+            return Ok(Json(ApiResponse::<PublicUserInfo>::error(
                 400,
                 format!("{}", e),
             )));
@@ -695,7 +698,7 @@ pub async fn cookie_login(
         let mut session = state.session_manager.lock().await;
         if let Err(e) = session.save_session(&user).await {
             error!("保存会话失败: {}", e);
-            return Ok(Json(ApiResponse::<crate::auth::UserAuth>::error(
+            return Ok(Json(ApiResponse::<PublicUserInfo>::error(
                 500,
                 format!("保存会话失败: {}", e),
             )));
@@ -754,7 +757,10 @@ pub async fn cookie_login(
             has_ptoken, final_user.panpsc.is_some());
     }
 
-    Ok(Json(ApiResponse::success_with_message(final_user, message)))
+    Ok(Json(ApiResponse::success_with_message(
+        PublicUserInfo::from(&final_user),
+        message,
+    )))
 }
 
 // ============================================================================
@@ -820,6 +826,12 @@ pub async fn add_account_and_activate(state: &AppState, user: UserAuth) -> anyho
 
     // Step 5: 推送 BudgetRecomputed（让前端 BudgetPanel 立即看到新账号配额）
     state.broadcast_budget_recomputed().await;
+
+    // Step 6: 后台补齐会员成长等级（登录接口不返回）
+    {
+        let state = state.clone();
+        tokio::spawn(async move { state.refresh_vip_levels().await });
+    }
 
     info!("add_account_and_activate: uid={} 已激活", uid.raw());
     Ok(())

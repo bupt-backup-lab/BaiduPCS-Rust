@@ -69,6 +69,33 @@ pub struct AppConfig {
     /// 分享同步配置
     #[serde(default)]
     pub share_sync: ShareSyncConfig,
+    /// 界面偏好配置（仅前端使用，后端只负责持久化）
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+// ============================================================================
+// 界面偏好配置
+// ============================================================================
+
+/// 界面偏好配置：保存在服务端，换浏览器 / 设备访问时保持一致
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiConfig {
+    /// 页面切换后返回「网盘管理」时保留上次浏览的目录（按账号分别记忆）
+    #[serde(default = "default_true")]
+    pub remember_netdisk_path: bool,
+    /// 顶部栏显示多账号横向快捷切换条（点击头像一键切换账号）
+    #[serde(default)]
+    pub account_quick_bar: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            remember_netdisk_path: true,
+            account_quick_bar: false,
+        }
+    }
 }
 
 // ============================================================================
@@ -475,6 +502,16 @@ pub struct ShareDirectDownloadConfig {
     /// 默认: false（避免误删用户数据）
     #[serde(default = "default_share_direct_cleanup_orphaned_on_startup")]
     pub cleanup_orphaned_on_startup: bool,
+
+    /// 自动清理孤立临时目录的周期（小时），0 表示关闭
+    ///
+    /// 只清理本实例命名空间（`{temp_dir}/inst-{实例id}/`）下、创建超过 6 小时、
+    /// 且不被任何未结束的转存 / 下载任务引用的目录；旧版本平铺的目录和其他实例的
+    /// 目录不会被自动清理。`auto_cleanup` 或 `cleanup_on_failure` 关闭时（想保留
+    /// 临时文件）自动清理不执行。
+    /// 默认: 6
+    #[serde(default = "default_share_direct_orphan_sweep_interval_hours")]
+    pub orphan_sweep_interval_hours: u64,
 }
 
 // 分享直下配置默认值函数
@@ -492,6 +529,10 @@ fn default_share_direct_cleanup_on_failure() -> bool {
 
 fn default_share_direct_cleanup_orphaned_on_startup() -> bool {
     false
+}
+
+fn default_share_direct_orphan_sweep_interval_hours() -> u64 {
+    6
 }
 
 impl ShareDirectDownloadConfig {
@@ -530,6 +571,7 @@ impl Default for ShareDirectDownloadConfig {
             auto_cleanup: default_share_direct_auto_cleanup(),
             cleanup_on_failure: default_share_direct_cleanup_on_failure(),
             cleanup_orphaned_on_startup: default_share_direct_cleanup_orphaned_on_startup(),
+            orphan_sweep_interval_hours: default_share_direct_orphan_sweep_interval_hours(),
         }
     }
 }
@@ -1301,6 +1343,7 @@ impl Default for AppConfig {
             multi_account_budget: MultiAccountBudgetConfig::default(),
             multi_account_vip_recommended: MultiAccountVipRecommendedConfig::default(),
             share_sync: ShareSyncConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 }
@@ -1600,6 +1643,21 @@ mod tests {
         assert_eq!(saved.exclude_preset_rules, ["*样片*", "*.nfo"]);
     }
 
+    /// 界面偏好：老配置文件缺失该段 / 缺字段时取默认值（记忆目录开、快捷条关）
+    #[test]
+    fn test_ui_config_defaults_and_roundtrip() {
+        assert_eq!(AppConfig::default().ui, UiConfig::default());
+        let legacy: UiConfig = toml::from_str("").unwrap();
+        assert!(legacy.remember_netdisk_path);
+        assert!(!legacy.account_quick_bar);
+
+        let saved: UiConfig =
+            toml::from_str("remember_netdisk_path = false
+account_quick_bar = true").unwrap();
+        assert!(!saved.remember_netdisk_path);
+        assert!(saved.account_quick_bar);
+    }
+
     #[test]
     fn test_vip_recommended_config() {
         // 测试普通用户推荐配置
@@ -1846,6 +1904,16 @@ mod tests {
         assert!(config.auto_cleanup);
         assert!(config.cleanup_on_failure);
         assert!(!config.cleanup_orphaned_on_startup);
+        assert_eq!(config.orphan_sweep_interval_hours, 6);
+    }
+
+    #[test]
+    fn test_share_direct_download_config_missing_sweep_interval_defaults() {
+        // 旧配置文件没有 orphan_sweep_interval_hours 字段时取默认值
+        let config: ShareDirectDownloadConfig =
+            toml::from_str("temp_dir = \"/.bpr_share_temp/\"
+").unwrap();
+        assert_eq!(config.orphan_sweep_interval_hours, 6);
     }
 
     #[test]
@@ -1856,6 +1924,7 @@ mod tests {
             auto_cleanup: false,
             cleanup_on_failure: false,
             cleanup_orphaned_on_startup: true,
+            orphan_sweep_interval_hours: 0,
         };
 
         // 序列化为 TOML
@@ -1868,6 +1937,7 @@ mod tests {
         assert!(!deserialized.auto_cleanup);
         assert!(!deserialized.cleanup_on_failure);
         assert!(deserialized.cleanup_orphaned_on_startup);
+        assert_eq!(deserialized.orphan_sweep_interval_hours, 0);
     }
 
     #[test]

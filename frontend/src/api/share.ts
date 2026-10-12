@@ -48,9 +48,9 @@ export interface ShareRecord {
   typicalCategory: number
   /** 文件路径 */
   typicalPath: string
-  /** 过期类型 */
+  /** 过期状态（-1=已过期, 0=有期限且未过期, 1=永久有效） */
   expiredType: number
-  /** 过期时间戳 */
+  /** 过期时间点（Unix 秒级时间戳，0=永久或已过期） */
   expiredTime: number
   /** 浏览次数 */
   viewCount: number

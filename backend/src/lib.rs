@@ -52,6 +52,9 @@ pub mod web_auth;
 // 🔥 分享同步模块（订阅第三方分享并持续同步）
 pub mod share_sync;
 
+// 跨账号复制 / 移动（临时私密分享 + 转存 + 撤销分享）
+pub mod cross_account;
+
 // 导出常用类型
 pub use auth::{LoginRequest, LoginResponse, QRCode, QRCodeStatus, UserAuth};
 pub use config::AppConfig;

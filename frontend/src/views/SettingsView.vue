@@ -102,6 +102,33 @@
                   </el-form-item>
                 </el-card>
 
+                <!-- 界面偏好 -->
+                <el-card id="section-ui" class="setting-card" shadow="hover">
+                  <template #header>
+                    <div class="card-header">
+                      <el-icon :size="20" color="#409eff">
+                        <Operation />
+                      </el-icon>
+                      <span>界面偏好</span>
+                    </div>
+                  </template>
+
+                  <el-form-item label="保留网盘目录">
+                    <el-switch v-model="formData.ui!.remember_netdisk_path" />
+                    <div class="form-tip">
+                      开启后，从其他页面切回「网盘管理」时回到上次浏览的目录（按账号分别记忆，刷新页面后回到根目录）；
+                      关闭则每次回到根目录
+                    </div>
+                  </el-form-item>
+
+                  <el-form-item label="账号快捷切换条">
+                    <el-switch v-model="formData.ui!.account_quick_bar" />
+                    <div class="form-tip">
+                      开启后，登录多个账号时在顶部栏横向列出所有账号，点击即可切换（原头像下拉菜单保留；手机端不显示）
+                    </div>
+                  </el-form-item>
+                </el-card>
+
                 <!-- Web 访问认证设置 -->
                 <div id="section-auth">
                   <AuthSettingsSection />
@@ -431,6 +458,16 @@
                     </el-radio-group>
                     <div class="form-tip">
                       选择"转存后自动下载"时，会根据下载配置决定是否弹出文件选择器
+                    </div>
+                  </el-form-item>
+
+                  <el-form-item label="网盘临时目录">
+                    <el-button :loading="cleaningTempDirs" @click="openTempCleanupDialog">
+                      清理残留临时目录
+                    </el-button>
+                    <div class="form-tip">
+                      分享直下 / 分享同步（仅同步到本地）会先把文件转存到网盘临时目录再下载，任务中断时可能留下残留、占用网盘空间。
+                      只清理当前账号网盘中没有任务在用的目录。
                     </div>
                   </el-form-item>
                 </el-card>
@@ -968,6 +1005,39 @@
         @confirm="handleDirConfirm"
     />
 
+    <!-- 清理残留临时目录对话框 -->
+    <el-dialog
+        v-model="tempCleanupDialogVisible"
+        title="清理残留临时目录"
+        :width="isMobile ? '92%' : '480px'"
+        :close-on-click-modal="!cleaningTempDirs"
+        :show-close="!cleaningTempDirs"
+    >
+      <p class="temp-cleanup-desc">
+        将删除当前账号网盘临时目录中、已经没有任何转存或下载任务在用的残留目录。删除的文件会进入网盘回收站，清空回收站后才会释放空间。
+      </p>
+      <el-checkbox v-model="tempCleanupIncludeForeign" :disabled="cleaningTempDirs">
+        同时清理其他实例留下的目录
+      </el-checkbox>
+      <el-alert
+          v-if="tempCleanupIncludeForeign"
+          type="warning"
+          :closable="false"
+          show-icon
+          style="margin-top: 12px"
+      >
+        <template #title>
+          同一个百度账号同时登录在多个实例上时，会删掉其他实例正在使用的目录。仅在确认没有其他实例在运行时勾选（例如容器重建前遗留的目录）。
+        </template>
+      </el-alert>
+      <template #footer>
+        <el-button :disabled="cleaningTempDirs" @click="tempCleanupDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="cleaningTempDirs" @click="handleCleanupTempDirs">
+          开始清理
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 密钥显示对话框 -->
     <el-dialog v-model="showKeyDialog" title="加密密钥" width="450px" :close-on-click-modal="false">
       <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 16px">
@@ -1038,8 +1108,10 @@ import {
   ArrowDown,
   Promotion,
   QuestionFilled,
+  Operation,
 } from '@element-plus/icons-vue'
 import { getTransferConfig, updateTransferConfig } from '@/api/config'
+import { cleanupOrphanedTempDirs } from '@/api/transfer'
 import {
   getEncryptionStatus,
   generateEncryptionKey,
@@ -1108,6 +1180,7 @@ const navItems = [
   { id: 'section-accounts', label: '账号管理', color: '#409eff' },
   { id: 'section-budget', label: '资源配额', color: '#9b59b6' },
   { id: 'section-server', label: '服务器', color: '#409eff' },
+  { id: 'section-ui', label: '界面偏好', color: '#409eff' },
   { id: 'section-auth', label: '访问认证', color: '#e6a23c' },
   { id: 'section-download', label: '下载', color: '#67c23a' },
   { id: 'section-upload', label: '上传', color: '#e6a23c' },
@@ -1249,6 +1322,14 @@ async function loadConfig() {
       formData.value.share_sync = { exclude_preset_rules: [] }
     }
 
+    // 初始化界面偏好（老后端不返回该段时用默认值）
+    if (formData.value) {
+      formData.value.ui = {
+        remember_netdisk_path: formData.value.ui?.remember_netdisk_path ?? true,
+        account_quick_bar: formData.value.ui?.account_quick_bar ?? false,
+      }
+    }
+
     // 初始化代理配置状态
     if (formData.value?.network?.proxy) {
       const p = formData.value.network.proxy
@@ -1293,6 +1374,51 @@ async function loadConfig() {
   } finally {
     loading.value = false
     nextTick(() => initSectionObserver())
+  }
+}
+
+// ==================== 清理残留临时目录 ====================
+const tempCleanupDialogVisible = ref(false)
+const tempCleanupIncludeForeign = ref(false)
+const cleaningTempDirs = ref(false)
+
+function openTempCleanupDialog() {
+  tempCleanupIncludeForeign.value = false
+  tempCleanupDialogVisible.value = true
+}
+
+async function handleCleanupTempDirs() {
+  cleaningTempDirs.value = true
+  try {
+    const result = await cleanupOrphanedTempDirs(tempCleanupIncludeForeign.value)
+    const parts = [`已清理 ${result.deleted_count} 个残留目录`]
+    if (result.failed_paths.length > 0) {
+      parts.push(`${result.failed_paths.length} 个清理失败，可稍后重试`)
+    }
+    if (result.foreign_namespace_skipped > 0) {
+      parts.push(`另有 ${result.foreign_namespace_skipped} 组其他实例的目录未清理，如确认不再使用可勾选"同时清理其他实例留下的目录"`)
+    }
+    const message = parts.join('；')
+    if (result.failed_paths.length > 0 || result.foreign_namespace_skipped > 0) {
+      ElMessage.warning({ message, duration: 8000 })
+    } else {
+      ElMessage.success(message)
+    }
+    tempCleanupDialogVisible.value = false
+  } catch (error: any) {
+    if (error && typeof error.code === 'number') {
+      // 业务错误（code≠0）拦截器不弹提示，这里统一提示
+      ElMessage.error('清理失败: ' + (error.message || '未知错误'))
+    } else {
+      // 网络错误 / 超时：拦截器已提示过错误本身。残留很多时清理可能超过请求超时，
+      // 但后端仍会在后台继续完成，提示用户稍后再看，避免反复点击
+      ElMessage.info({
+        message: '若残留目录较多，清理可能仍在后台进行，请过几分钟再点一次确认是否已清理完',
+        duration: 8000,
+      })
+    }
+  } finally {
+    cleaningTempDirs.value = false
   }
 }
 
@@ -1766,6 +1892,12 @@ onUnmounted(() => {
 </script>
 
 <style scoped lang="scss">
+.temp-cleanup-desc {
+  margin: 0 0 12px;
+  color: var(--el-text-color-regular);
+  line-height: 1.6;
+}
+
 .settings-container {
   width: 100%;
   height: 100%;

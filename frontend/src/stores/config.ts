@@ -26,7 +26,8 @@ export const useConfigStore = defineStore('config', () => {
     loading.value = true
     try {
       await updateConfig(newConfig)
-      config.value = newConfig
+      // 存快照而非引用：调用方（设置页表单）后续未保存的编辑不应提前生效
+      config.value = JSON.parse(JSON.stringify(newConfig))
     } catch (error) {
       console.error('更新配置失败:', error)
       throw error

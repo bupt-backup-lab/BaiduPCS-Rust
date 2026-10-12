@@ -95,10 +95,10 @@ pub struct ShareRecordData {
     /// 文件路径
     #[serde(rename = "typicalPath")]
     pub typical_path: String,
-    /// 过期类型
+    /// 过期状态（-1=已过期, 0=有期限且未过期, 1=永久有效）
     #[serde(rename = "expiredType")]
     pub expired_type: i32,
-    /// 过期时间戳
+    /// 过期时间点（Unix 秒级时间戳，0=永久或已过期）
     #[serde(rename = "expiredTime")]
     pub expired_time: i64,
     /// 浏览次数
@@ -410,10 +410,13 @@ pub async fn get_share_list(
         Ok(response) => {
             if response.is_success() {
                 // 转换为API响应格式
+                // 百度返回的 expiredTime 是剩余秒数，这里统一转成过期时间点
+                let now = chrono::Utc::now().timestamp();
                 let list: Vec<ShareRecordData> = response
                     .list
                     .into_iter()
                     .map(|record| ShareRecordData {
+                        expired_time: record.expire_at(now),
                         share_id: record.share_id,
                         fs_ids: record.fs_ids,
                         shortlink: record.shortlink,
@@ -422,7 +425,6 @@ pub async fn get_share_list(
                         typical_category: record.typical_category,
                         typical_path: record.typical_path,
                         expired_type: record.expired_type,
-                        expired_time: record.expired_time,
                         view_count: record.view_count,
                     })
                     .collect();
