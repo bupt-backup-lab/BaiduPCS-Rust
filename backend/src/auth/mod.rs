@@ -13,5 +13,6 @@ pub use qrcode::QRCodeAuth;
 pub use session::SessionManager;
 pub use types::{
     AccountConfig, AccountDownloadConfig, AccountSummary, AccountUploadConfig, AccountsData,
-    CookieLoginApiRequest, LoginRequest, LoginResponse, QRCode, QRCodeStatus, Uid, UserAuth,
+    CookieLoginApiRequest, LoginRequest, LoginResponse, PublicUserInfo, QRCode, QRCodeStatus,
+    QRCodeStatusResponse, Uid, UserAuth,
 };

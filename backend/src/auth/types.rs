@@ -316,6 +316,64 @@ impl UserAuth {
     }
 }
 
+/// 当前用户的对外展示信息（`/auth/user`、登录接口响应用，不含任何凭证）。
+///
+/// `UserAuth` 同时是 `accounts.json` 的持久化结构，不能在其上跳过凭证字段的序列化，
+/// 所以 HTTP 响应一律转换成本结构。
+#[derive(Debug, Clone, Serialize)]
+pub struct PublicUserInfo {
+    pub uid: u64,
+    pub username: String,
+    pub nickname: Option<String>,
+    pub avatar_url: Option<String>,
+    pub vip_type: Option<u32>,
+    pub vip_level: Option<u32>,
+    pub total_space: Option<u64>,
+    pub used_space: Option<u64>,
+    pub login_time: i64,
+}
+
+impl From<&UserAuth> for PublicUserInfo {
+    fn from(user: &UserAuth) -> Self {
+        Self {
+            uid: user.uid,
+            username: user.username.clone(),
+            nickname: user.nickname.clone(),
+            avatar_url: user.avatar_url.clone(),
+            vip_type: user.vip_type,
+            vip_level: user.vip_level,
+            total_space: user.total_space,
+            used_space: user.used_space,
+            login_time: user.login_time,
+        }
+    }
+}
+
+/// 扫码状态的 HTTP 响应（`QRCodeStatus` 的脱敏版本，成功时不回传凭证）
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum QRCodeStatusResponse {
+    Waiting,
+    Scanned,
+    Success { user: PublicUserInfo },
+    Expired,
+    Failed { reason: String },
+}
+
+impl From<&QRCodeStatus> for QRCodeStatusResponse {
+    fn from(status: &QRCodeStatus) -> Self {
+        match status {
+            QRCodeStatus::Waiting => Self::Waiting,
+            QRCodeStatus::Scanned => Self::Scanned,
+            QRCodeStatus::Success { user, .. } => Self::Success { user: user.into() },
+            QRCodeStatus::Expired => Self::Expired,
+            QRCodeStatus::Failed { reason } => Self::Failed {
+                reason: reason.clone(),
+            },
+        }
+    }
+}
+
 /// 二维码信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QRCode {
@@ -424,6 +482,23 @@ mod tests {
         assert_eq!(back.active_uid, Some(100));
         assert_eq!(back.users.len(), 1);
         assert_eq!(back.users[0].uid, 100);
+    }
+
+    #[test]
+    fn public_user_info_has_no_credentials() {
+        let mut user = UserAuth::new(1, "u".into(), "SECRET_BDUSS".into());
+        user.stoken = Some("SECRET_STOKEN".into());
+        user.cookies = Some("BDUSS=SECRET_BDUSS".into());
+        let json = serde_json::to_string(&PublicUserInfo::from(&user)).unwrap();
+        assert!(!json.contains("SECRET"), "{json}");
+
+        let status = QRCodeStatus::Success {
+            user,
+            token: "SECRET_BDUSS".into(),
+        };
+        let json = serde_json::to_string(&QRCodeStatusResponse::from(&status)).unwrap();
+        assert!(json.contains("\"status\":\"success\""), "{json}");
+        assert!(!json.contains("SECRET"), "{json}");
     }
 
     #[test]

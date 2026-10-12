@@ -47,25 +47,22 @@ export interface QRCode {
   created_at: number
 }
 
+/** 当前用户信息（后端 `PublicUserInfo`，已脱敏，不含任何凭证） */
 export interface UserAuth {
   uid: number
   username: string
   nickname?: string
   avatar_url?: string
   vip_type?: number
+  vip_level?: number
   total_space?: number
   used_space?: number
-  bduss: string
-  stoken?: string
-  ptoken?: string
-  cookies?: string
   login_time: number
 }
 
 export interface QRCodeStatus {
   status: 'waiting' | 'scanned' | 'success' | 'expired' | 'failed'
   user?: UserAuth
-  token?: string
   reason?: string
 }
 
