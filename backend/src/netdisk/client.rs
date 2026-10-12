@@ -6,9 +6,9 @@ use crate::auth::UserAuth;
 use crate::common::ProxyConfig;
 use crate::netdisk::{
     CreateFileResponse, FileListResponse, FileManagerResponse, FileManagerTaskQueryResponse,
-    FileOperationErrorPayload, FileOperationItem, FileOperationOutcome, FileOperationSuccess,
-    LocateDownloadResponse, PrecreateResponse, RapidUploadResponse, RenameItem,
-    UploadChunkResponse, UploadErrorKind,
+    FileOperationErrorPayload, FileOperationItem, FileOperationItemWithOnDup, FileOperationOutcome,
+    FileOperationSuccess, LocateDownloadResponse, OnDup, PrecreateResponse, RapidUploadResponse,
+    RenameItem, UploadChunkResponse, UploadErrorKind,
 };
 use crate::sign::LocateSign;
 use anyhow::{Context, Result};
@@ -4435,6 +4435,7 @@ impl NetdiskClient {
                     authwidget: resp.authwidget,
                     verify_scene: resp.verify_scene,
                     still_running: false,
+                    failed_items: Vec::new(),
                 },
             });
         }
@@ -4477,6 +4478,7 @@ impl NetdiskClient {
                         authwidget: None,
                         verify_scene: None,
                         still_running: true,
+                        failed_items: Vec::new(),
                     },
                 });
             }
@@ -4554,6 +4556,7 @@ impl NetdiskClient {
                         authwidget: parsed.authwidget,
                         verify_scene: parsed.verify_scene,
                         still_running: false,
+                        failed_items: Vec::new(),
                     },
                 });
             }
@@ -4564,7 +4567,7 @@ impl NetdiskClient {
                     return Ok(FileOperationOutcome::Success(FileOperationSuccess {
                         taskid,
                         total: parsed.total,
-                        list: parsed.list,
+                        list: parsed.list.into_iter().map(Into::into).collect(),
                     }));
                 }
                 "failed" => {
@@ -4586,6 +4589,7 @@ impl NetdiskClient {
                             authwidget: parsed.authwidget,
                             verify_scene: parsed.verify_scene,
                             still_running: false,
+                            failed_items: parsed.list.into_iter().map(Into::into).collect(),
                         },
                     });
                 }
@@ -4606,21 +4610,34 @@ impl NetdiskClient {
     ///
     /// 入参 `items` 中每条 item 必须已经经过 handler 层路径归一化与校验（含
     /// 加密保护、文件名校验、根路径拒绝）。本方法不做这些校验。
-    pub async fn copy_files(&self, items: &[FileOperationItem]) -> Result<FileOperationOutcome> {
+    ///
+    /// `ondup` 为目标已存在同名项时的处理策略；`None` 不传，沿用百度默认：冲突项保留不动、
+    /// 其余照常完成，任务以失败返回并在 `failed_items` 中逐项列出冲突（error_code=-8）。
+    pub async fn copy_files(
+        &self,
+        items: &[FileOperationItem],
+        ondup: Option<OnDup>,
+    ) -> Result<FileOperationOutcome> {
         if items.is_empty() {
             return Err(anyhow::anyhow!("copy_files: items 不能为空"));
         }
-        let filelist_json = serde_json::to_string(items).context("序列化 copy filelist 失败")?;
+        let filelist_json =
+            copy_move_filelist_json(items, ondup).context("序列化 copy filelist 失败")?;
         let body = self.filemanager_post("copy", &filelist_json).await?;
         self.handle_filemanager_result(&body).await
     }
 
     /// 批量移动文件（filemanager opera=move）
-    pub async fn move_files(&self, items: &[FileOperationItem]) -> Result<FileOperationOutcome> {
+    pub async fn move_files(
+        &self,
+        items: &[FileOperationItem],
+        ondup: Option<OnDup>,
+    ) -> Result<FileOperationOutcome> {
         if items.is_empty() {
             return Err(anyhow::anyhow!("move_files: items 不能为空"));
         }
-        let filelist_json = serde_json::to_string(items).context("序列化 move filelist 失败")?;
+        let filelist_json =
+            copy_move_filelist_json(items, ondup).context("序列化 move filelist 失败")?;
         let body = self.filemanager_post("move", &filelist_json).await?;
         self.handle_filemanager_result(&body).await
     }
@@ -4632,6 +4649,22 @@ impl NetdiskClient {
         let filelist_json = serde_json::to_string(&[item]).context("序列化 rename filelist 失败")?;
         let body = self.filemanager_post("rename", &filelist_json).await?;
         self.handle_filemanager_result(&body).await
+    }
+}
+
+/// 序列化 copy/move 的 filelist；`ondup` 需逐项写入（实测写在表单 / URL 上不生效，见 [`OnDup`]）
+fn copy_move_filelist_json(
+    items: &[FileOperationItem],
+    ondup: Option<OnDup>,
+) -> serde_json::Result<String> {
+    match ondup {
+        None => serde_json::to_string(items),
+        Some(ondup) => serde_json::to_string(
+            &items
+                .iter()
+                .map(|item| FileOperationItemWithOnDup { item, ondup })
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 
@@ -5629,6 +5662,58 @@ mod transfer_preservation_tests {
         assert_eq!(r.status, "failed");
         assert_eq!(r.task_errno, -6);
         assert_eq!(r.show_msg, "会话过期");
+    }
+
+    #[test]
+    fn test_taskquery_failed_list_conflict_items() {
+        // 实测：默认 ondup 下冲突项逐项返回 error_code=-8，未列出的项已成功
+        let json = r#"{"errno":0,"task_errno":-30,"status":"failed","list":[
+            {"error_code":-8,"from":"\/p\/src\/dirA","from_meta":{"isdir":1,"mtime":"1","size":0},"to":"\/p\/dst\/dirA","to_meta":{"isdir":1,"mtime":"1","size":0}},
+            {"error_code":-8,"from":"\/p\/src\/f.txt","from_meta":{"isdir":0,"mtime":"1","size":3},"to":"\/p\/dst\/f.txt","to_meta":{"isdir":0,"mtime":"1","size":15}}
+        ]}"#;
+        let r: FileManagerTaskQueryResponse = serde_json::from_str(json).unwrap();
+        let items: Vec<crate::netdisk::FileOperationFailedItem> =
+            r.list.into_iter().map(Into::into).collect();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].from, "/p/src/dirA");
+        assert_eq!(items[0].to, "/p/dst/dirA");
+        assert_eq!(items[0].error_code, -8);
+        assert!(items[0].isdir);
+        assert!(!items[1].isdir);
+    }
+
+    #[test]
+    fn test_copy_move_filelist_ondup_per_item() {
+        use crate::netdisk::{FileOperationItem, OnDup};
+        let items = vec![FileOperationItem {
+            path: "/a/x.mp4".into(),
+            dest: "/b".into(),
+            newname: "x.mp4".into(),
+        }];
+        let without: serde_json::Value =
+            serde_json::from_str(&super::copy_move_filelist_json(&items, None).unwrap()).unwrap();
+        assert_eq!(
+            without,
+            serde_json::json!([{"path":"/a/x.mp4","dest":"/b","newname":"x.mp4"}])
+        );
+        let with: serde_json::Value = serde_json::from_str(
+            &super::copy_move_filelist_json(&items, Some(OnDup::Newcopy)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            with,
+            serde_json::json!([{"path":"/a/x.mp4","dest":"/b","newname":"x.mp4","ondup":"newcopy"}])
+        );
+    }
+
+    #[test]
+    fn test_ondup_rejects_skip() {
+        // web 版 filemanager 不识别 skip，不允许前端传入
+        assert!(serde_json::from_str::<crate::netdisk::OnDup>(r#""skip""#).is_err());
+        assert_eq!(
+            serde_json::from_str::<crate::netdisk::OnDup>(r#""overwrite""#).unwrap(),
+            crate::netdisk::OnDup::Overwrite
+        );
     }
 
     #[test]
