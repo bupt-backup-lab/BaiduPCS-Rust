@@ -193,6 +193,9 @@ pub struct AppState {
 
     /// 🔥 分享同步管理器
     pub share_sync_manager: Arc<RwLock<Option<Arc<crate::share_sync::ShareSyncManager>>>>,
+
+    /// 跨账号复制 / 移动任务表与待撤销分享台账
+    pub cross_account_jobs: Arc<crate::cross_account::CrossAccountRegistry>,
 }
 
 impl AppState {
@@ -439,6 +442,7 @@ impl AppState {
             budget_scheduler,
             decrypt_semaphore,
             share_sync_manager: Arc::new(RwLock::new(None)),
+            cross_account_jobs: Arc::new(crate::cross_account::CrossAccountRegistry::default()),
         })
     }
 
@@ -862,6 +866,12 @@ impl AppState {
 
             // 分享同步 / 分享直下已结束任务的内存回收
             self.start_finished_task_reclaim_loop();
+
+            // 撤销上次运行遗留的跨账号临时分享
+            let state = self.clone();
+            tokio::spawn(async move {
+                crate::cross_account::revoke_leftover_shares(&state).await;
+            });
         }
 
         // 🔥 启动 WebSocket 批量发送器
@@ -2027,6 +2037,24 @@ impl AppState {
     pub async fn active_client(&self) -> Option<Arc<NetdiskClient>> {
         let uid = (*self.active_uid.read().await)?;
         self.client_pool.read().await.get_client(uid)
+    }
+
+    /// 取指定账号的 `NetdiskClient`；`uid=None` 时等同 [`Self::active_client`]。
+    ///
+    /// 供接受可选 `uid` 参数的接口使用（如跨账号复制 / 移动时浏览目标账号目录）。
+    pub async fn client_for_or_active(&self, uid: Option<Uid>) -> Option<Arc<NetdiskClient>> {
+        match uid {
+            Some(uid) => self.client_pool.read().await.get_client(uid),
+            None => self.active_client().await,
+        }
+    }
+
+    /// 预热指定账号；`uid=None` 时等同 [`Self::trigger_warmup`]。
+    pub async fn warmup_for_or_active(&self, uid: Option<Uid>) -> anyhow::Result<bool> {
+        match uid {
+            Some(uid) => self.warmup_uid(uid).await.map(|_| true),
+            None => self.trigger_warmup().await,
+        }
     }
 
     /// 取**当前活跃账号**的 `UserAuth`（取代 `current_user` 直读）。

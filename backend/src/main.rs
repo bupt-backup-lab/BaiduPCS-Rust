@@ -301,6 +301,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/files/copy", post(handlers::copy_files))
         .route("/files/move", post(handlers::move_files))
         .route("/files/rename", post(handlers::rename_file))
+        // 跨账号复制 / 移动
+        .route(
+            "/cross-account/jobs",
+            post(handlers::cross_account::create_cross_account_job)
+                .get(handlers::cross_account::list_cross_account_jobs),
+        )
+        .route(
+            "/cross-account/jobs/:id",
+            get(handlers::cross_account::get_cross_account_job),
+        )
         // 下载API
         .route("/downloads", post(handlers::create_download))
         .route("/downloads", get(handlers::get_all_downloads))

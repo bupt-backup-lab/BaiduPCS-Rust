@@ -138,6 +138,8 @@ interface Props {
    * 例如 move 操作时禁止"目标父目录 == 源父目录"，但目标的子目录是合法的。
    */
   blockedExactPaths?: string[]
+  /** 浏览哪个账号的网盘（跨账号复制 / 移动选目标目录）；缺省为活跃账号 */
+  uid?: number | null
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -145,6 +147,7 @@ const props = withDefaults(defineProps<Props>(), {
   initialPath: '/',
   blockedPaths: () => [],
   blockedExactPaths: () => [],
+  uid: null,
 })
 
 const emit = defineEmits<{
@@ -236,7 +239,7 @@ async function loadFolders(append = false) {
       page.value = 1
       folders.value = []
     }
-    const data = await getFileList(currentPath.value, page.value, PAGE_SIZE)
+    const data = await getFileList(currentPath.value, page.value, PAGE_SIZE, 'name', false, props.uid)
     const onlyFolders = data.list.filter((f) => f.isdir === 1)
     folders.value = append ? folders.value.concat(onlyFolders) : onlyFolders
     hasMore.value = data.has_more
@@ -281,7 +284,7 @@ async function confirmCreateFolder() {
   }
   const target = joinPath(currentPath.value, name)
   try {
-    await createFolder(target)
+    await createFolder(target, props.uid)
     ElMessage.success('创建成功')
     creatingFolder.value = false
     newFolderName.value = ''

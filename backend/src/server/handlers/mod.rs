@@ -7,6 +7,7 @@ pub mod budget;
 pub mod cloud_dl;
 pub mod common;
 pub mod config;
+pub mod cross_account;
 pub mod download;
 pub mod encryption_export;
 pub mod file;

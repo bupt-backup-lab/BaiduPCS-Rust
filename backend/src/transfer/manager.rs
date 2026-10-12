@@ -3894,11 +3894,11 @@ impl TransferManager {
             ) {
                 for metadata in history_tasks {
                     // 排除已在当前任务中的（避免重复）
-                    // 分享同步内部转存任务（带 share-sync: 归属）不在「转存管理」历史展示
+                    // 内部转存任务（分享同步 / 跨账号）不在「转存管理」历史展示
                     if metadata
                         .backup_config_id
                         .as_deref()
-                        .is_some_and(|c| c.starts_with("share-sync:"))
+                        .is_some_and(is_internal_config_id)
                     {
                         continue;
                     }
@@ -3984,11 +3984,11 @@ impl TransferManager {
             owner_uid: metadata.owner_uid.map(crate::auth::Uid::new).unwrap_or_default(),
             // 恢复分享根路径（老元数据缺该字段时为 None，调用方退化到启发式）
             share_root_path: metadata.share_root_path.clone(),
-            // 内部标记不持久化于独立列：从 backup_config_id 是否带 share-sync: 前缀推断
+            // 内部标记不持久化于独立列：从 backup_config_id 前缀推断
             is_internal: metadata
                 .backup_config_id
                 .as_deref()
-                .is_some_and(|c| c.starts_with("share-sync:")),
+                .is_some_and(is_internal_config_id),
             backup_config_id: metadata.backup_config_id.clone(),
             randsk: None,
         })
@@ -4687,13 +4687,13 @@ impl TransferManager {
         // 恢复分享根路径，避免恢复后退化到启发式推导
         task.share_root_path = recovery_info.share_root_path.clone();
 
-        // 还原任务归属与内部标记：带 share-sync: 前缀的是分享同步内部转存任务，
-        // 必须恢复 is_internal，否则重启后会漏进「转存管理」列表（与运行期隔离不一致）。
+        // 还原任务归属与内部标记：分享同步 / 跨账号的内部转存任务必须恢复 is_internal，
+        // 否则重启后会漏进「转存管理」列表（与运行期隔离不一致）。
         task.backup_config_id = recovery_info.backup_config_id.clone();
         task.is_internal = recovery_info
             .backup_config_id
             .as_deref()
-            .is_some_and(|c| c.starts_with("share-sync:"));
+            .is_some_and(is_internal_config_id);
 
         // 恢复文件列表
         if let Some(ref json) = recovery_info.file_list_json {
@@ -5214,7 +5214,7 @@ pub struct CleanupOrphanedResult {
 /// 列出网盘目录下的全部条目（自动翻页）
 ///
 /// 目录不存在时返回 `Ok(None)`。
-async fn list_all_dir_entries(
+pub(crate) async fn list_all_dir_entries(
     client: &NetdiskClient,
     dir: &str,
 ) -> std::result::Result<Option<Vec<crate::netdisk::FileItem>>, String> {
@@ -5279,6 +5279,12 @@ impl TransferManager {
             info!("启动时清理孤立临时目录已禁用");
         }
     }
+}
+
+/// `backup_config_id` 是否属于内部转存任务（不在「转存管理」展示）：
+/// 分享同步 `share-sync:{订阅id}`、跨账号复制/移动 `cross-account:{任务id}`
+fn is_internal_config_id(id: &str) -> bool {
+    id.starts_with("share-sync:") || id.starts_with(crate::cross_account::INTERNAL_CONFIG_PREFIX)
 }
 
 /// 逐级确保网盘路径存在，已存在的目录跳过创建，避免百度 API 静默重命名。
@@ -6101,6 +6107,13 @@ fn merge_batch_results(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_internal_config_id() {
+        assert!(is_internal_config_id("share-sync:sub-1"));
+        assert!(is_internal_config_id("cross-account:job-1"));
+        assert!(!is_internal_config_id("6f1c2a3b-backup-uuid"));
+    }
 
     #[test]
     fn test_extract_task_errno_negative_30() {

@@ -74,6 +74,10 @@
                 <el-icon><Rank /></el-icon>
                 移动到...
               </el-dropdown-item>
+              <el-dropdown-item v-if="authStore.hasMultipleAccounts" @click="handleBatchCrossAccount">
+                <el-icon><Switch /></el-icon>
+                复制/移动到其他账号...
+              </el-dropdown-item>
               <el-dropdown-item @click="handleBatchShare">
                 <el-icon><Link /></el-icon>
                 分享
@@ -172,6 +176,10 @@
                 <el-icon><Rank /></el-icon>
                 移动到...
               </el-dropdown-item>
+              <el-dropdown-item v-if="authStore.hasMultipleAccounts" @click="handleBatchCrossAccount">
+                <el-icon><Switch /></el-icon>
+                复制/移动到其他账号...
+              </el-dropdown-item>
               <el-dropdown-item divided @click="handleBatchDelete">
                 <el-icon><Delete /></el-icon>
                 删除 ({{ selectedFiles.length }})
@@ -213,14 +221,16 @@
     />
 
     <!-- 文件列表 -->
-    <div class="file-list" ref="fileListRef" @scroll="handleScroll">
+    <div class="file-list" ref="fileListRef" @scroll="handleScroll" @contextmenu="handleBlankContextMenu">
       <!-- PC端表格视图 -->
       <el-table
           v-if="!isMobile"
+          ref="fileTableRef"
           v-loading="loading"
           :data="fileList"
           style="width: 100%"
           @row-click="handleRowClick"
+          @row-contextmenu="handleRowContextMenu"
           @selection-change="handleSelectionChange"
           @sort-change="handleSortChange"
           :default-sort="{ prop: 'server_filename', order: 'ascending' }"
@@ -304,6 +314,7 @@
             class="mobile-file-card"
             :class="{ 'is-folder': item.isdir === 1 }"
             @click="handleRowClick(item)"
+            @contextmenu.prevent="openContextMenu($event.clientX, $event.clientY, [item])"
         >
           <div class="file-card-main">
             <el-icon :size="36" class="file-card-icon" :color="item.isdir === 1 ? '#e6a23c' : '#409eff'">
@@ -342,6 +353,14 @@
                 @click.stop="item.isdir === 1 ? handleDownloadFolder(item) : handleDownload(item)"
             >
               <el-icon><Download /></el-icon>
+            </el-button>
+            <el-button
+                size="small"
+                circle
+                title="更多操作"
+                @click.stop="handleCardMoreClick($event, item)"
+            >
+              <el-icon><MoreFilled /></el-icon>
             </el-button>
           </div>
         </div>
@@ -438,6 +457,31 @@
         @confirm="handleFolderPicked"
     />
 
+    <!-- 复制 / 移动同名冲突处理 -->
+    <FileConflictDialog
+        v-model="conflictDialogVisible"
+        :operation="conflictOperation"
+        :conflicts="conflictEntries"
+        :done-count="conflictDoneCount"
+        @resolve="handleConflictResolve"
+    />
+
+    <!-- 跨账号复制 / 移动 -->
+    <CrossAccountTransferDialog
+        v-model="crossAccountVisible"
+        :files="crossAccountFiles"
+        @finished="handleCrossAccountFinished"
+    />
+
+    <!-- 文件右键菜单 -->
+    <FileContextMenu
+        v-model="contextMenuVisible"
+        :x="contextMenuX"
+        :y="contextMenuY"
+        :items="contextMenuItems"
+        @select="handleContextMenuSelect"
+    />
+
     <!-- 重命名对话框 -->
     <el-dialog
         v-model="renameDialogVisible"
@@ -479,7 +523,7 @@
 <script setup lang="ts">
 import {ref, onMounted, onBeforeUnmount, computed, nextTick} from 'vue'
 import {ElMessage, ElMessageBox} from 'element-plus'
-import type {InputInstance} from 'element-plus'
+import type {InputInstance, TableInstance} from 'element-plus'
 import {
   getFileList,
   searchFiles,
@@ -494,12 +538,32 @@ import {
   joinPath,
   basename,
   dirname,
+  FILE_EXISTS_ERROR_CODE,
   type FileItem,
   type FileOperationItem,
   type FileOperationOutcomeDto,
   type FileSortOrder,
 } from '@/api/file'
 import NetdiskFolderPickerModal from '@/components/NetdiskFolderPickerModal.vue'
+import FileContextMenu, {type ContextMenuItem} from '@/components/FileContextMenu.vue'
+import FileConflictDialog, {type ConflictChoice, type ConflictEntry} from '@/components/FileConflictDialog.vue'
+import CrossAccountTransferDialog from '@/components/CrossAccountTransferDialog.vue'
+import type {CrossAccountJob} from '@/api/crossAccount'
+import {useAuthStore} from '@/stores/auth'
+import {
+  CopyDocument as CopyDocumentIcon,
+  Delete as DeleteIcon,
+  Download as DownloadIcon,
+  Edit as EditIcon,
+  Folder as FolderIcon,
+  FolderAdd as FolderAddIcon,
+  FolderOpened as FolderOpenedIcon,
+  Link as LinkIcon,
+  Rank as RankIcon,
+  Switch as SwitchIcon,
+  Refresh as RefreshIcon,
+  Upload as UploadIcon,
+} from '@element-plus/icons-vue'
 import {useIsMobile} from '@/utils/responsive'
 import {createDownload, createFolderDownload, createBatchDownload, type BatchDownloadItem, type DownloadConflictStrategy} from '@/api/download'
 import {createUpload, createFolderUpload, type UploadConflictStrategy} from '@/api/upload'
@@ -567,6 +631,27 @@ const folderPickerTitle = computed(() =>
 const folderPickerBlockedPaths = ref<string[]>([])      // 子树禁选（含子目录）
 const folderPickerBlockedExactPaths = ref<string[]>([]) // 精确禁选（仅自身）
 const folderPickerInitialPath = ref<string>('/')
+// 本次复制 / 移动的源文件（来自批量选择或右键菜单）
+const operationFiles = ref<FileItem[]>([])
+// 复制 / 移动同名冲突对话框
+const conflictDialogVisible = ref(false)
+const conflictOperation = ref<'copy' | 'move'>('copy')
+const conflictEntries = ref<ConflictEntry[]>([])
+const conflictDoneCount = ref(0)
+let conflictResolver: ((choice: ConflictChoice) => void) | null = null
+
+// 跨账号复制 / 移动
+const authStore = useAuthStore()
+const crossAccountVisible = ref(false)
+const crossAccountFiles = ref<FileItem[]>([])
+
+// 右键菜单
+const fileTableRef = ref<TableInstance>()
+const contextMenuVisible = ref(false)
+const contextMenuX = ref(0)
+const contextMenuY = ref(0)
+// 右键作用对象；为空表示在空白处右键
+const contextMenuTargets = ref<FileItem[]>([])
 
 // 重命名对话框
 const renameDialogVisible = ref(false)
@@ -577,6 +662,8 @@ const renameNameError = computed(() => validateFilename(renameNewName.value))
 
 // 单文件下载（支持 ask_each_time）
 const pendingDownloadFile = ref<FileItem | null>(null)
+// 批量下载（支持 ask_each_time）：选择目录期间暂存待下载项
+const pendingBatchDownloadFiles = ref<FileItem[]>([])
 
 // 转存对话框状态
 const showTransferDialog = ref(false)
@@ -1055,13 +1142,16 @@ function handleSelectionChange(selection: FileItem[]) {
   selectedFiles.value = selection
 }
 
-// 批量下载入口
+// 批量下载入口（工具栏）
 async function handleBatchDownload() {
   if (selectedFiles.value.length === 0) {
     ElMessage.warning('请先选择要下载的文件或文件夹')
     return
   }
+  await startBatchDownload([...selectedFiles.value])
+}
 
+async function startBatchDownload(files: FileItem[]) {
   // 确保配置已加载
   if (!downloadConfig.value) {
     await loadDownloadConfig()
@@ -1069,12 +1159,26 @@ async function handleBatchDownload() {
 
   // 检查是否需要询问下载目录
   if (downloadConfig.value?.ask_each_time) {
+    // 清掉之前取消选择目录时残留的单文件下载，避免确认目录后下错对象
+    pendingDownloadFile.value = null
+    pendingBatchDownloadFiles.value = files
     showDownloadPicker.value = true
   } else {
     // 使用默认目录直接下载
     const targetDir = downloadConfig.value?.default_directory || downloadConfig.value?.download_dir || 'downloads'
-    await executeBatchDownload(targetDir)
+    await executeBatchDownload(targetDir, files)
   }
+}
+
+// 下载任意文件/文件夹组合：单项走单文件/文件夹下载，多项走批量下载
+async function downloadFiles(files: FileItem[]) {
+  if (files.length === 0) return
+  if (files.length === 1) {
+    const [file] = files
+    await (file.isdir === 1 ? handleDownloadFolder(file) : handleDownload(file))
+    return
+  }
+  await startBatchDownload(files)
 }
 
 // 处理下载目录确认
@@ -1112,7 +1216,9 @@ async function handleConfirmDownload(payload: { path: string; setAsDefault: bool
     pendingDownloadFile.value = null
   } else {
     // 批量下载
-    await executeBatchDownload(path)
+    const files = pendingBatchDownloadFiles.value
+    pendingBatchDownloadFiles.value = []
+    await executeBatchDownload(path, files)
   }
 }
 
@@ -1133,7 +1239,9 @@ async function handleUseDefaultDownload(conflictStrategy?: string) {
     pendingDownloadFile.value = null
   } else {
     // 批量下载
-    await executeBatchDownload(targetDir)
+    const files = pendingBatchDownloadFiles.value
+    pendingBatchDownloadFiles.value = []
+    await executeBatchDownload(targetDir, files)
   }
 }
 
@@ -1141,14 +1249,14 @@ async function handleUseDefaultDownload(conflictStrategy?: string) {
 const BATCH_SIZE = 10 // 每批处理 10 个下载项
 
 // 执行批量下载（支持分批处理）
-async function executeBatchDownload(targetDir: string) {
-  if (selectedFiles.value.length === 0) return
+async function executeBatchDownload(targetDir: string, files: FileItem[]) {
+  if (files.length === 0) return
 
   batchDownloading.value = true
 
   try {
     // 构建批量下载请求项
-    const allItems: BatchDownloadItem[] = selectedFiles.value.map(file => ({
+    const allItems: BatchDownloadItem[] = files.map(file => ({
       fs_id: file.fs_id,
       path: file.path,
       name: file.server_filename,
@@ -1462,7 +1570,11 @@ function handleTransferSuccess(taskId: string) {
 
 // 单个文件分享
 function handleSingleShare(file: FileItem) {
-  shareFiles.value = [file]
+  openShareDialog([file])
+}
+
+function openShareDialog(files: FileItem[]) {
+  shareFiles.value = files
   showShareDialog.value = true
 }
 
@@ -1472,17 +1584,24 @@ function handleBatchShare() {
     ElMessage.warning('请先选择要分享的文件或文件夹')
     return
   }
-  shareFiles.value = [...selectedFiles.value]
-  showShareDialog.value = true
+  openShareDialog([...selectedFiles.value])
 }
 
 async function handleBatchDelete() {
   if (selectedFiles.value.length === 0) return
-  const count = selectedFiles.value.length
-  const paths = selectedFiles.value.map(f => f.path)
+  await confirmDeleteFiles([...selectedFiles.value])
+}
+
+async function confirmDeleteFiles(files: FileItem[]) {
+  if (files.length === 0) return
+  const count = files.length
+  const paths = files.map(f => f.path)
+  const message = count === 1
+      ? `确定要删除「${getDisplayName(files[0])}」吗？删除后可在回收站找回。`
+      : `确定要删除选中的 ${count} 个文件/文件夹吗？删除后可在回收站找回。`
   try {
     await ElMessageBox.confirm(
-        `确定要删除选中的 ${count} 个文件/文件夹吗？删除后可在回收站找回。`,
+        message,
         '确认删除',
         {
           confirmButtonText: '删除',
@@ -1547,9 +1666,9 @@ function handleShareDirectDownloadSuccess(taskId: string) {
 // 文件管理操作（filemanager: copy / move / rename）
 // =====================================================
 
-/** 选中文件中是否含加密文件/文件夹（这种禁止 copy/move） */
-function selectionContainsEncrypted(): FileItem | null {
-  return selectedFiles.value.find((f) => f.is_encrypted || f.is_encrypted_folder) ?? null
+/** 文件中是否含加密文件/文件夹（这种禁止 copy/move/rename） */
+function findEncrypted(files: FileItem[]): FileItem | null {
+  return files.find((f) => f.is_encrypted || f.is_encrypted_folder) ?? null
 }
 
 /** 触发批量复制：弹出文件夹选择器 */
@@ -1558,19 +1677,24 @@ function handleBatchCopy() {
     ElMessage.warning('请先选择要复制的文件或文件夹')
     return
   }
-  const enc = selectionContainsEncrypted()
+  openCopyPicker([...selectedFiles.value])
+}
+
+function openCopyPicker(files: FileItem[]) {
+  const enc = findEncrypted(files)
   if (enc) {
     // 提示使用用户可见的原始名称（加密文件页面显示的是 original_name 而非 UUID.dat）
     ElMessage.error(`加密文件/文件夹禁止复制：${getDisplayName(enc)}`)
     return
   }
+  operationFiles.value = files
   folderPickerOperation.value = 'copy'
   folderPickerInitialPath.value = currentDir.value
   // 复制允许进入源文件夹自身子目录（百度支持），但禁选"目标 == 源父目录"：
   // 目录选择器无法改 newname，默认用源 basename，若选回源父目录相当于同名复制，
   // 百度会返回 errno=-8 这类"文件已存在"错误，提前在 UI 禁选避免误点。
   const exactBlocked = new Set<string>()
-  for (const f of selectedFiles.value) {
+  for (const f of files) {
     exactBlocked.add(dirname(f.path))
   }
   folderPickerBlockedPaths.value = []
@@ -1584,11 +1708,16 @@ function handleBatchMove() {
     ElMessage.warning('请先选择要移动的文件或文件夹')
     return
   }
-  const enc = selectionContainsEncrypted()
+  openMovePicker([...selectedFiles.value])
+}
+
+function openMovePicker(files: FileItem[]) {
+  const enc = findEncrypted(files)
   if (enc) {
     ElMessage.error(`加密文件/文件夹禁止移动：${getDisplayName(enc)}`)
     return
   }
+  operationFiles.value = files
   folderPickerOperation.value = 'move'
   folderPickerInitialPath.value = currentDir.value
   // 与后端 move-only 校验对齐，分两类禁选：
@@ -1598,7 +1727,7 @@ function handleBatchMove() {
   //      → 对应 ensure_move_not_same_parent
   const subtreeBlocked = new Set<string>()
   const exactBlocked = new Set<string>()
-  for (const f of selectedFiles.value) {
+  for (const f of files) {
     if (f.isdir === 1) {
       subtreeBlocked.add(f.path)
     }
@@ -1609,13 +1738,40 @@ function handleBatchMove() {
   showFolderPicker.value = true
 }
 
+/** 触发批量跨账号复制 / 移动 */
+function handleBatchCrossAccount() {
+  if (selectedFiles.value.length === 0) {
+    ElMessage.warning('请先选择要复制或移动的文件或文件夹')
+    return
+  }
+  openCrossAccountDialog([...selectedFiles.value])
+}
+
+function openCrossAccountDialog(files: FileItem[]) {
+  const enc = findEncrypted(files)
+  if (enc) {
+    ElMessage.error(`加密文件/文件夹不支持跨账号复制/移动：${getDisplayName(enc)}`)
+    return
+  }
+  // 与后端一致：只支持同一目录下的选中项（避免父子重叠、跨目录同名）
+  if (new Set(files.map((f) => dirname(f.path))).size > 1) {
+    ElMessage.warning('跨账号复制/移动只支持同一目录下的文件，跨目录的搜索结果请分批操作')
+    return
+  }
+  crossAccountFiles.value = files
+  crossAccountVisible.value = true
+}
+
+/** 跨账号移动删掉了源文件：刷新当前列表 */
+function handleCrossAccountFinished(job: CrossAccountJob) {
+  if (job.source_deleted) {
+    refreshFileList()
+  }
+}
+
 /** 文件夹选择器确认 */
 async function handleFolderPicked(destPath: string) {
-  if (folderPickerOperation.value === 'copy') {
-    await executeBatchCopy(destPath)
-  } else {
-    await executeBatchMove(destPath)
-  }
+  await executeFileOperation(folderPickerOperation.value, destPath)
 }
 
 /** 处理 filemanager 操作的统一结果，返回是否成功 */
@@ -1641,48 +1797,107 @@ function reportOutcome(action: string, outcome: FileOperationOutcomeDto): boolea
     )
     return false
   }
+  // 逐项失败：未列出的项已成功，提示失败数量而不是笼统的 task_errno
+  const failedCount = outcome.failed_items?.length ?? 0
+  if (failedCount > 0) {
+    ElMessage.error(`${failedCount} 项${action}失败：${outcome.message}`)
+    return false
+  }
   ElMessage.error(`${action}失败：${outcome.message}`)
   return false
 }
 
-async function executeBatchCopy(dest: string) {
-  const items: FileOperationItem[] = selectedFiles.value.map((f) => ({
+/**
+ * 执行复制 / 移动，并处理同名冲突
+ *
+ * 百度按项独立处理：不冲突的照常完成，同名项保持不动并以 error_code=-8 逐项返回。
+ * 因此先按默认提交，再只针对冲突项询问用户：保留两者 / 覆盖 → 仅重提冲突项，
+ * 跳过 → 不再处理。不会重复处理已完成的项。
+ */
+async function executeFileOperation(kind: 'copy' | 'move', dest: string) {
+  const action = kind === 'copy' ? '复制' : '移动'
+  const submit = kind === 'copy' ? copyFiles : moveFiles
+  const busy = kind === 'copy' ? batchCopying : batchMoving
+  const files = operationFiles.value
+  const items: FileOperationItem[] = files.map((f) => ({
     path: f.path,
     dest,
     newname: f.server_filename,
   }))
-  batchCopying.value = true
+  busy.value = true
   try {
-    const outcome = await copyFiles(items)
-    if (reportOutcome('复制', outcome)) {
-      selectedFiles.value = []
-      await refreshFileList()
+    const outcome = await submit(items)
+    const failedItems = outcome.kind === 'failed' && !outcome.still_running ? outcome.failed_items ?? [] : []
+    const conflictsByPath = new Map(
+        failedItems.filter((i) => i.error_code === FILE_EXISTS_ERROR_CODE).map((i) => [i.from, i])
+    )
+    const conflictItems = items.filter((i) => conflictsByPath.has(i.path))
+
+    if (conflictItems.length === 0) {
+      if (reportOutcome(action, outcome)) {
+        selectedFiles.value = []
+        await refreshFileList()
+      } else if (failedItems.length > 0 && failedItems.length < items.length) {
+        // 部分项已完成，刷新以反映真实状态
+        await refreshFileList()
+      }
+      return
+    }
+
+    // 不冲突的项已完成，先刷新列表
+    const doneCount = items.length - failedItems.length
+    const otherFailedCount = failedItems.length - conflictItems.length
+    selectedFiles.value = []
+    if (doneCount > 0) await refreshFileList()
+
+    const choice = await askConflictChoice(
+        kind,
+        conflictItems.map((item) => {
+          const file = files.find((f) => f.path === item.path)
+          return {
+            path: item.path,
+            name: file ? getDisplayName(file) : item.newname,
+            // 是否文件夹决定能否覆盖，以百度返回为准
+            isdir: !!conflictsByPath.get(item.path)?.isdir || file?.isdir === 1,
+          }
+        }),
+        doneCount
+    )
+    if (choice === 'skip') {
+      ElMessage.info(`已跳过 ${conflictItems.length} 个同名项`)
+    } else {
+      const retry = await submit(conflictItems, choice)
+      if (reportOutcome(action, retry)) await refreshFileList()
+    }
+    if (otherFailedCount > 0) {
+      ElMessage.warning(`另有 ${otherFailedCount} 项${action}失败`)
     }
   } catch (e: unknown) {
-    ElMessage.error(e instanceof Error ? e.message : '复制请求失败')
+    ElMessage.error(e instanceof Error ? e.message : `${action}请求失败`)
   } finally {
-    batchCopying.value = false
+    busy.value = false
   }
 }
 
-async function executeBatchMove(dest: string) {
-  const items: FileOperationItem[] = selectedFiles.value.map((f) => ({
-    path: f.path,
-    dest,
-    newname: f.server_filename,
-  }))
-  batchMoving.value = true
-  try {
-    const outcome = await moveFiles(items)
-    if (reportOutcome('移动', outcome)) {
-      selectedFiles.value = []
-      await refreshFileList()
-    }
-  } catch (e: unknown) {
-    ElMessage.error(e instanceof Error ? e.message : '移动请求失败')
-  } finally {
-    batchMoving.value = false
-  }
+/** 弹出同名冲突对话框，等待用户选择 */
+function askConflictChoice(
+    operation: 'copy' | 'move',
+    entries: ConflictEntry[],
+    doneCount: number
+): Promise<ConflictChoice> {
+  conflictOperation.value = operation
+  conflictEntries.value = entries
+  conflictDoneCount.value = doneCount
+  conflictDialogVisible.value = true
+  return new Promise((resolve) => {
+    conflictResolver = resolve
+  })
+}
+
+function handleConflictResolve(choice: ConflictChoice) {
+  const resolve = conflictResolver
+  conflictResolver = null
+  resolve?.(choice)
 }
 
 /** 单个文件/文件夹重命名入口 */
@@ -1731,6 +1946,149 @@ async function handleRenameConfirm() {
   }
 }
 
+// =====================================================
+// 右键菜单（行 / 移动端卡片 / 空白处）
+// =====================================================
+
+const contextMenuItems = computed<ContextMenuItem[]>(() => {
+  const targets = contextMenuTargets.value
+
+  // 空白处：当前目录级操作
+  if (targets.length === 0) {
+    return [
+      { key: 'new-folder', label: '新建文件夹', icon: FolderAddIcon },
+      { key: 'upload', label: '上传', icon: UploadIcon },
+      { key: 'refresh', label: '刷新', icon: RefreshIcon, divided: true },
+    ]
+  }
+
+  const single = targets.length === 1 ? targets[0] : null
+  const encryptedReason = findEncrypted(targets) ? '加密文件/文件夹不支持此操作' : undefined
+  const items: ContextMenuItem[] = []
+  if (single?.isdir === 1) {
+    items.push({ key: 'open', label: '打开', icon: FolderOpenedIcon })
+  }
+  if (single && isSearchMode.value) {
+    items.push({ key: 'open-parent', label: '打开所在目录', icon: FolderIcon })
+  }
+  items.push(
+      { key: 'download', label: '下载', icon: DownloadIcon, divided: items.length > 0 },
+      { key: 'share', label: '分享', icon: LinkIcon },
+      {
+        key: 'copy',
+        label: '复制到...',
+        icon: CopyDocumentIcon,
+        disabled: !!encryptedReason || batchCopying.value,
+        disabledReason: encryptedReason ?? '正在复制，请稍候',
+      },
+      {
+        key: 'move',
+        label: '移动到...',
+        icon: RankIcon,
+        disabled: !!encryptedReason || batchMoving.value,
+        disabledReason: encryptedReason ?? '正在移动，请稍候',
+      },
+  )
+  if (authStore.hasMultipleAccounts) {
+    items.push({
+      key: 'cross-account',
+      label: '复制/移动到其他账号...',
+      icon: SwitchIcon,
+      disabled: !!encryptedReason,
+      disabledReason: encryptedReason,
+    })
+  }
+  if (single) {
+    items.push({
+      key: 'rename',
+      label: '重命名',
+      icon: EditIcon,
+      disabled: !!encryptedReason,
+      disabledReason: encryptedReason,
+    })
+  }
+  items.push({ key: 'delete', label: '删除', icon: DeleteIcon, divided: true, danger: true })
+  return items
+})
+
+function openContextMenu(x: number, y: number, targets: FileItem[]) {
+  contextMenuTargets.value = targets
+  contextMenuX.value = x
+  contextMenuY.value = y
+  contextMenuVisible.value = true
+}
+
+/** PC 表格行右键：与百度网盘网页版一致，右键已选中的行作用于整个选区，否则改为只选中该行 */
+function handleRowContextMenu(row: FileItem, _column: unknown, event: MouseEvent) {
+  event.preventDefault()
+  const inSelection = selectedFiles.value.some((f) => f.fs_id === row.fs_id)
+  if (!inSelection) {
+    fileTableRef.value?.clearSelection()
+    fileTableRef.value?.toggleRowSelection(row, true)
+  }
+  openContextMenu(event.clientX, event.clientY, inSelection ? [...selectedFiles.value] : [row])
+}
+
+/**
+ * 列表空白处右键；行 / 卡片上的右键已被其处理器 preventDefault，这里跳过。
+ * 搜索结果不属于某个目录，不提供目录级菜单，保留浏览器原生菜单。
+ */
+function handleBlankContextMenu(event: MouseEvent) {
+  if (event.defaultPrevented || isSearchMode.value) return
+  event.preventDefault()
+  openContextMenu(event.clientX, event.clientY, [])
+}
+
+/** 移动端卡片"更多"按钮：菜单右上角对齐按钮下沿 */
+function handleCardMoreClick(event: MouseEvent, item: FileItem) {
+  const target = event.target as HTMLElement
+  const rect = (target.closest('button') ?? target).getBoundingClientRect()
+  openContextMenu(rect.right, rect.bottom + 4, [item])
+}
+
+function handleContextMenuSelect(key: string) {
+  const targets = contextMenuTargets.value
+  const [first] = targets
+  switch (key) {
+    case 'open':
+      navigateToDir(first.path)
+      break
+    case 'open-parent':
+      navigateToDir(dirname(first.path))
+      break
+    case 'download':
+      void downloadFiles(targets)
+      break
+    case 'share':
+      openShareDialog(targets)
+      break
+    case 'copy':
+      openCopyPicker(targets)
+      break
+    case 'move':
+      openMovePicker(targets)
+      break
+    case 'cross-account':
+      openCrossAccountDialog(targets)
+      break
+    case 'rename':
+      handleSingleRename(first)
+      break
+    case 'delete':
+      void confirmDeleteFiles(targets)
+      break
+    case 'new-folder':
+      showCreateFolderDialog()
+      break
+    case 'upload':
+      showFilePicker.value = true
+      break
+    case 'refresh':
+      refreshFileList()
+      break
+  }
+}
+
 // 防止 import 被 tree-shake 误判 unused（basename / joinPath 在模板中未直接使用）
 void basename
 void joinPath
@@ -1738,7 +2096,7 @@ void joinPath
 
 <script lang="ts">
 // 图标导入
-export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Download, Share, Loading, Link, Delete, Search, Close, CopyDocument, Rank, Edit, MoreFilled, Operation} from '@element-plus/icons-vue'
+export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Download, Share, Loading, Link, Delete, Search, Close, CopyDocument, Rank, Switch, Edit, MoreFilled, Operation} from '@element-plus/icons-vue'
 </script>
 
 <style scoped lang="scss">
@@ -2064,6 +2422,9 @@ export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Dow
   border-radius: 12px;
   cursor: pointer;
   transition: all 0.2s;
+  // 长按唤起右键菜单时不触发文字选择 / iOS 系统长按菜单
+  user-select: none;
+  -webkit-touch-callout: none;
 
   // 触摸反馈
   &:active {
