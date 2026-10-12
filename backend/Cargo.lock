@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "baidu-netdisk-rust"
-version = "2.2.4"
+version = "2.3.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
