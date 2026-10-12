@@ -1,8 +1,11 @@
 /**
- * 跨账号复制 / 移动 API
+ * 跨账号复制 / 移动 / 下载 API
  *
  * 后端做法：源账号建临时私密分享 → 目标账号转存 → 立即撤销分享；
- * 移动模式在转存完全成功后删除源文件。任务在后台执行，前端轮询任务状态。
+ * 移动模式在转存完全成功后删除源文件。
+ * 下载模式即自动生成链接的「分享直下」：下载账号转存到临时目录后自动下载，
+ * 转存一结束就撤销分享，下载进度在「下载管理」查看。
+ * 任务在后台执行，前端轮询任务状态。
  *
  *   - POST /api/v1/cross-account/jobs      创建任务
  *   - GET  /api/v1/cross-account/jobs/:id  查询任务
@@ -14,7 +17,7 @@ import { createApiClient } from './client'
 // 错误由调用方在对话框内展示，不走全局弹窗
 const silentClient = createApiClient({ showErrorMessage: false })
 
-export type CrossAccountMode = 'copy' | 'move'
+export type CrossAccountMode = 'copy' | 'move' | 'download'
 
 export type CrossAccountStage =
     | 'checking'
@@ -30,9 +33,15 @@ export interface CrossAccountJob {
   id: string
   mode: CrossAccountMode
   source_uid: number
+  /** 目标账号；下载模式为负责下载的账号 */
   target_uid: number
   paths: string[]
+  /** 目标账号中的保存目录（下载模式为空） */
   target_dir: string
+  /** 本地下载目录（仅下载模式） */
+  local_download_path: string | null
+  /** 目标账号上的转存任务 id（下载模式即分享直下任务） */
+  transfer_task_id: string | null
   stage: CrossAccountStage
   transferred_count: number
   total_count: number
@@ -52,7 +61,10 @@ export interface CreateCrossAccountJobRequest {
   source_uid?: number
   target_uid: number
   paths: string[]
-  target_dir: string
+  /** 复制 / 移动必填 */
+  target_dir?: string
+  /** 下载必填 */
+  local_download_path?: string
   mode: CrossAccountMode
 }
 
@@ -65,6 +77,16 @@ export const CROSS_ACCOUNT_STAGE_LABELS: Record<CrossAccountStage, string> = {
   deleting_source: '正在删除源文件',
   completed: '已完成',
   failed: '失败',
+}
+
+/** 下载模式下与复制 / 移动说法不同的阶段 */
+const DOWNLOAD_STAGE_LABELS: Partial<Record<CrossAccountStage, string>> = {
+  checking: '正在检查源文件',
+  transferring: '下载账号转存到临时目录中',
+}
+
+export function crossAccountStageLabel(mode: CrossAccountMode, stage: CrossAccountStage): string {
+  return (mode === 'download' && DOWNLOAD_STAGE_LABELS[stage]) || CROSS_ACCOUNT_STAGE_LABELS[stage]
 }
 
 export function isCrossAccountJobFinished(job: CrossAccountJob): boolean {

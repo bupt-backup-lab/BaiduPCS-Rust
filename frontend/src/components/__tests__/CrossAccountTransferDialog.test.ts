@@ -1,6 +1,6 @@
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElNotification } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CrossAccountTransferDialog from '../CrossAccountTransferDialog.vue'
 import type { CrossAccountJob } from '@/api/crossAccount'
@@ -22,6 +22,20 @@ vi.mock('@/utils/responsive', async () => {
   return { useIsMobile: () => ref(false) }
 })
 
+const router = vi.hoisted(() => ({ push: vi.fn() }))
+
+vi.mock('vue-router', () => ({
+  useRouter: () => router,
+}))
+
+vi.mock('@/api/config', () => ({
+  getConfig: vi.fn().mockResolvedValue({
+    download: { download_dir: 'downloads', default_directory: 'D:/dl', ask_each_time: false },
+  }),
+  setDefaultDownloadDir: vi.fn(),
+  updateRecentDirDebounced: vi.fn(),
+}))
+
 const api = vi.hoisted(() => ({
   createCrossAccountJob: vi.fn(),
   getCrossAccountJob: vi.fn(),
@@ -41,6 +55,8 @@ function makeJob(overrides: Partial<CrossAccountJob> = {}): CrossAccountJob {
     target_uid: 2,
     paths: ['/docs/a.txt'],
     target_dir: '/',
+    local_download_path: null,
+    transfer_task_id: null,
     stage: 'sharing',
     transferred_count: 0,
     total_count: 0,
@@ -73,7 +89,7 @@ function mountDialog() {
   const wrapper = mount(CrossAccountTransferDialog, {
     attachTo: document.body,
     props: { modelValue: false, files: [file] },
-    global: { plugins: [ElementPlus], stubs: { NetdiskFolderPickerModal: true } },
+    global: { plugins: [ElementPlus], stubs: { NetdiskFolderPickerModal: true, FilePickerModal: true } },
   })
   return wrapper
 }
@@ -96,6 +112,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   api.createCrossAccountJob.mockReset()
   api.getCrossAccountJob.mockReset()
+  router.push.mockReset()
 })
 
 afterEach(() => {
@@ -199,5 +216,118 @@ describe('CrossAccountTransferDialog', () => {
     expect(wrapper.emitted('finished')).toHaveLength(1)
 
     wrapper.unmount()
+  })
+
+  it('下载模式：默认填入默认下载目录，提交本地目录，完成后可跳转下载管理', async () => {
+    const wrapper = mountDialog()
+    await wrapper.setProps({ initialMode: 'download' })
+    await wrapper.setProps({ modelValue: true })
+    await flush()
+
+    expect(document.body.querySelector('.el-dialog__title')?.textContent).toBe('用其他账号下载')
+    // @ts-expect-error setup 内部状态
+    expect(wrapper.vm.localDownloadPath).toBe('D:/dl')
+
+    api.createCrossAccountJob.mockResolvedValue(
+        makeJob({ mode: 'download', target_dir: '', local_download_path: 'D:/dl' }),
+    )
+    api.getCrossAccountJob
+        .mockResolvedValueOnce(
+            makeJob({ mode: 'download', target_dir: '', local_download_path: 'D:/dl', stage: 'transferring' }),
+        )
+        .mockResolvedValueOnce(
+            makeJob({
+              mode: 'download',
+              target_dir: '',
+              local_download_path: 'D:/dl',
+              stage: 'completed',
+              transfer_task_id: 't-1',
+            }),
+        )
+
+    footerButton('开始下载').click()
+    await flush()
+    expect(api.createCrossAccountJob).toHaveBeenCalledWith({
+      source_uid: 1,
+      target_uid: 2,
+      paths: ['/docs/a.txt'],
+      local_download_path: 'D:/dl',
+      mode: 'download',
+    })
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await flush()
+    expect(document.body.textContent).toContain('下载账号转存到临时目录中')
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await flush()
+    expect(document.body.textContent).toContain('已由 bob 开始下载到 D:/dl')
+    // @ts-expect-error setup 内部状态
+    expect(wrapper.vm.activeStep).toBe(3)
+
+    footerButton('查看下载').click()
+    await flush()
+    expect(router.push).toHaveBeenCalledWith('/downloads')
+    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([false])
+
+    wrapper.unmount()
+  })
+
+  it('下载模式未选本地目录时不能提交', async () => {
+    const { getConfig } = await import('@/api/config')
+    vi.mocked(getConfig).mockResolvedValueOnce({ download: { download_dir: '', ask_each_time: false } } as never)
+    const wrapper = mountDialog()
+    await wrapper.setProps({ initialMode: 'download' })
+    await wrapper.setProps({ modelValue: true })
+    await flush()
+
+    expect(footerButton('开始下载').disabled).toBe(true)
+    // @ts-expect-error setup 内部方法
+    wrapper.vm.handleConfirmDownload({ path: 'E:/x', setAsDefault: false })
+    await flush()
+    expect(footerButton('开始下载').disabled).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('下载模式后台运行：结束通知可点击跳转下载管理；转存前失败则不可点', async () => {
+    const success = vi.spyOn(ElNotification, 'success').mockImplementation(() => ({ close: () => {} }))
+    const error = vi.spyOn(ElNotification, 'error').mockImplementation(() => ({ close: () => {} }))
+    const dl = { mode: 'download' as const, target_dir: '', local_download_path: 'D:/dl' }
+
+    async function runInBackground(final: CrossAccountJob) {
+      const wrapper = mountDialog()
+      await wrapper.setProps({ initialMode: 'download' })
+      await wrapper.setProps({ modelValue: true })
+      await flush()
+      api.createCrossAccountJob.mockResolvedValue(makeJob(dl))
+      api.getCrossAccountJob.mockResolvedValueOnce(final)
+      footerButton('开始下载').click()
+      await flush()
+      footerButton('后台运行').click()
+      await wrapper.setProps({ modelValue: false })
+      await vi.advanceTimersByTimeAsync(1000)
+      await flush()
+      wrapper.unmount()
+    }
+
+    await runInBackground(makeJob({ ...dl, stage: 'completed' }))
+    const okOpts = success.mock.calls[0][0] as { message: string; onClick?: () => void }
+    expect(okOpts.message).toContain('点击查看下载')
+    okOpts.onClick?.()
+    expect(router.push).toHaveBeenCalledWith('/downloads')
+
+    // 开始下载后失败：可点击
+    await runInBackground(makeJob({ ...dl, stage: 'failed', failed_stage: 'revoking', error: '下载失败' }))
+    expect((error.mock.calls[0][0] as { onClick?: unknown }).onClick).toBeTypeOf('function')
+
+    // 转存阶段失败：下载管理里没有任务，不可点击
+    await runInBackground(makeJob({ ...dl, stage: 'failed', failed_stage: 'transferring', error: '网盘空间不足' }))
+    const failOpts = error.mock.calls[1][0] as { message: string; onClick?: unknown }
+    expect(failOpts.onClick).toBeUndefined()
+    expect(failOpts.message).toBe('网盘空间不足')
+
+    success.mockRestore()
+    error.mockRestore()
   })
 })

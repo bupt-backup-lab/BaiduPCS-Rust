@@ -389,7 +389,9 @@ describe('FilesView 右键菜单', () => {
       // @ts-expect-error setup 内部方法
       wrapper.vm.handleRowContextMenu(file, null, contextEvent())
       await nextTick()
-      expect(menuLabels()).toEqual(['下载', '分享', '复制到...', '移动到...', '复制/移动到其他账号...', '重命名', '删除'])
+      expect(menuLabels()).toEqual([
+        '下载', '用其他账号下载...', '分享', '复制到...', '移动到...', '复制/移动到其他账号...', '重命名', '删除',
+      ])
 
       clickMenuItem('复制/移动到其他账号...')
       await nextTick()
@@ -397,11 +399,32 @@ describe('FilesView 右键菜单', () => {
       expect(wrapper.vm.crossAccountVisible).toBe(true)
       // @ts-expect-error setup 内部状态
       expect(wrapper.vm.crossAccountFiles.map((f: { path: string }) => f.path)).toEqual(['/docs/a.txt'])
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.crossAccountMode).toBe('copy')
 
       wrapper.unmount()
     })
 
-    it('加密文件的跨账号复制/移动置灰', async () => {
+    it('"用其他账号下载..."以下载模式打开跨账号对话框', async () => {
+      const wrapper = mountFilesView()
+      await nextTick()
+
+      // @ts-expect-error setup 内部方法
+      wrapper.vm.handleRowContextMenu(makeFile(), null, contextEvent())
+      await nextTick()
+      clickMenuItem('用其他账号下载...')
+      await nextTick()
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.crossAccountVisible).toBe(true)
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.crossAccountMode).toBe('download')
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.crossAccountFiles.map((f: { path: string }) => f.path)).toEqual(['/docs/a.txt'])
+
+      wrapper.unmount()
+    })
+
+    it('加密文件的跨账号复制/移动/下载置灰', async () => {
       const wrapper = mountFilesView()
       await nextTick()
 
@@ -411,7 +434,7 @@ describe('FilesView 右键菜单', () => {
       await nextTick()
 
       const disabled = menuItems().filter((el) => el.classList.contains('is-disabled')).map((el) => el.textContent?.trim())
-      expect(disabled).toEqual(['复制到...', '移动到...', '复制/移动到其他账号...', '重命名'])
+      expect(disabled).toEqual(['用其他账号下载...', '复制到...', '移动到...', '复制/移动到其他账号...', '重命名'])
 
       wrapper.unmount()
     })

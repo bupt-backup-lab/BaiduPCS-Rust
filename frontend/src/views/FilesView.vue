@@ -66,6 +66,10 @@
                 <el-icon><Download /></el-icon>
                 批量下载
               </el-dropdown-item>
+              <el-dropdown-item v-if="authStore.hasMultipleAccounts" @click="handleBatchCrossAccount('download')">
+                <el-icon><Download /></el-icon>
+                用其他账号下载...
+              </el-dropdown-item>
               <el-dropdown-item @click="handleBatchCopy">
                 <el-icon><CopyDocument /></el-icon>
                 复制到...
@@ -74,7 +78,7 @@
                 <el-icon><Rank /></el-icon>
                 移动到...
               </el-dropdown-item>
-              <el-dropdown-item v-if="authStore.hasMultipleAccounts" @click="handleBatchCrossAccount">
+              <el-dropdown-item v-if="authStore.hasMultipleAccounts" @click="handleBatchCrossAccount('copy')">
                 <el-icon><Switch /></el-icon>
                 复制/移动到其他账号...
               </el-dropdown-item>
@@ -164,6 +168,10 @@
                 <el-icon><Download /></el-icon>
                 批量下载 ({{ selectedFiles.length }})
               </el-dropdown-item>
+              <el-dropdown-item v-if="authStore.hasMultipleAccounts" @click="handleBatchCrossAccount('download')">
+                <el-icon><Download /></el-icon>
+                用其他账号下载...
+              </el-dropdown-item>
               <el-dropdown-item @click="handleBatchShare">
                 <el-icon><Link /></el-icon>
                 分享 ({{ selectedFiles.length }})
@@ -176,7 +184,7 @@
                 <el-icon><Rank /></el-icon>
                 移动到...
               </el-dropdown-item>
-              <el-dropdown-item v-if="authStore.hasMultipleAccounts" @click="handleBatchCrossAccount">
+              <el-dropdown-item v-if="authStore.hasMultipleAccounts" @click="handleBatchCrossAccount('copy')">
                 <el-icon><Switch /></el-icon>
                 复制/移动到其他账号...
               </el-dropdown-item>
@@ -466,10 +474,11 @@
         @resolve="handleConflictResolve"
     />
 
-    <!-- 跨账号复制 / 移动 -->
+    <!-- 跨账号复制 / 移动 / 下载 -->
     <CrossAccountTransferDialog
         v-model="crossAccountVisible"
         :files="crossAccountFiles"
+        :initial-mode="crossAccountMode"
         @finished="handleCrossAccountFinished"
     />
 
@@ -548,7 +557,7 @@ import NetdiskFolderPickerModal from '@/components/NetdiskFolderPickerModal.vue'
 import FileContextMenu, {type ContextMenuItem} from '@/components/FileContextMenu.vue'
 import FileConflictDialog, {type ConflictChoice, type ConflictEntry} from '@/components/FileConflictDialog.vue'
 import CrossAccountTransferDialog from '@/components/CrossAccountTransferDialog.vue'
-import type {CrossAccountJob} from '@/api/crossAccount'
+import type {CrossAccountJob, CrossAccountMode} from '@/api/crossAccount'
 import {useAuthStore} from '@/stores/auth'
 import {
   CopyDocument as CopyDocumentIcon,
@@ -640,10 +649,11 @@ const conflictEntries = ref<ConflictEntry[]>([])
 const conflictDoneCount = ref(0)
 let conflictResolver: ((choice: ConflictChoice) => void) | null = null
 
-// 跨账号复制 / 移动
+// 跨账号复制 / 移动 / 下载
 const authStore = useAuthStore()
 const crossAccountVisible = ref(false)
 const crossAccountFiles = ref<FileItem[]>([])
+const crossAccountMode = ref<CrossAccountMode>('copy')
 
 // 右键菜单
 const fileTableRef = ref<TableInstance>()
@@ -1738,27 +1748,31 @@ function openMovePicker(files: FileItem[]) {
   showFolderPicker.value = true
 }
 
-/** 触发批量跨账号复制 / 移动 */
-function handleBatchCrossAccount() {
+/** 触发批量跨账号复制 / 移动 / 下载 */
+function handleBatchCrossAccount(mode: CrossAccountMode = 'copy') {
   if (selectedFiles.value.length === 0) {
-    ElMessage.warning('请先选择要复制或移动的文件或文件夹')
+    ElMessage.warning('请先选择文件或文件夹')
     return
   }
-  openCrossAccountDialog([...selectedFiles.value])
+  openCrossAccountDialog([...selectedFiles.value], mode)
 }
 
-function openCrossAccountDialog(files: FileItem[]) {
+function openCrossAccountDialog(files: FileItem[], mode: CrossAccountMode = 'copy') {
+  const action = mode === 'download' ? '用其他账号下载' : '跨账号复制/移动'
+  // 与跨账号复制/移动一致，加密文件/文件夹不支持
   const enc = findEncrypted(files)
   if (enc) {
-    ElMessage.error(`加密文件/文件夹不支持跨账号复制/移动：${getDisplayName(enc)}`)
+    ElMessage.error(`加密文件/文件夹不支持${action}：${getDisplayName(enc)}`)
     return
   }
-  // 与后端一致：只支持同一目录下的选中项（避免父子重叠、跨目录同名）
+  // 与后端一致：只支持同一目录下的选中项（临时分享只能分享同一目录下的文件；
+  // 也避免父子重叠、跨目录同名）
   if (new Set(files.map((f) => dirname(f.path))).size > 1) {
-    ElMessage.warning('跨账号复制/移动只支持同一目录下的文件，跨目录的搜索结果请分批操作')
+    ElMessage.warning(`${action}只支持同一目录下的文件，跨目录的搜索结果请分批操作`)
     return
   }
   crossAccountFiles.value = files
+  crossAccountMode.value = mode
   crossAccountVisible.value = true
 }
 
@@ -1971,8 +1985,17 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
   if (single && isSearchMode.value) {
     items.push({ key: 'open-parent', label: '打开所在目录', icon: FolderIcon })
   }
+  items.push({ key: 'download', label: '下载', icon: DownloadIcon, divided: items.length > 0 })
+  if (authStore.hasMultipleAccounts) {
+    items.push({
+      key: 'cross-account-download',
+      label: '用其他账号下载...',
+      icon: DownloadIcon,
+      disabled: !!encryptedReason,
+      disabledReason: encryptedReason,
+    })
+  }
   items.push(
-      { key: 'download', label: '下载', icon: DownloadIcon, divided: items.length > 0 },
       { key: 'share', label: '分享', icon: LinkIcon },
       {
         key: 'copy',
@@ -2070,6 +2093,9 @@ function handleContextMenuSelect(key: string) {
       break
     case 'cross-account':
       openCrossAccountDialog(targets)
+      break
+    case 'cross-account-download':
+      openCrossAccountDialog(targets, 'download')
       break
     case 'rename':
       handleSingleRename(first)

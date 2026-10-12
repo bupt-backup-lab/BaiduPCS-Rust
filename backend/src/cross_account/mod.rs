@@ -1,4 +1,4 @@
-//! 跨账号复制 / 移动
+//! 跨账号复制 / 移动 / 下载
 //!
 //! 百度网盘没有账号间直传接口，这里用「临时私密分享 + 自动转存 + 立即撤销分享」拼出来：
 //!
@@ -8,6 +8,11 @@
 //! 3. 不论转存成败，立即撤销分享
 //! 4. 移动模式：转存**完全成功**、且逐项核对目标与源一致（文件数 + 总字节）后才删除源文件
 //!    （进回收站）；任何一步无法确认都保留源文件
+//!
+//! 下载模式（用另一个账号下载，比如会员账号）就是自动生成链接的「分享直下」：第 2 步改为
+//! 下载账号建一个普通的分享直下任务（转存到临时目录 → 自动下载 → 清理临时目录，与手动
+//! 粘贴链接完全一样，在「转存管理」「下载管理」可见），转存阶段一结束就撤销分享——文件此时
+//! 已在下载账号的临时目录里，后续下载不再依赖分享。
 //!
 //! 分享转存接口不支持 `ondup`：目标目录已有同名项时百度直接报错（errno=12 / -30），
 //! 不会自动改名，所以建分享前先检查冲突，直接给出明确提示。
@@ -55,6 +60,18 @@ const VERIFY_MAX_DIRS: usize = 1000;
 pub enum CrossAccountMode {
     Copy,
     Move,
+    /// 用目标账号下载到本地（分享直下）
+    Download,
+}
+
+impl CrossAccountMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Copy => "复制",
+            Self::Move => "移动",
+            Self::Download => "下载",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -64,7 +81,7 @@ pub enum CrossAccountStage {
     Checking,
     /// 源账号创建临时分享
     Sharing,
-    /// 目标账号转存中
+    /// 目标账号转存中（下载模式：转存到下载账号的临时目录）
     Transferring,
     /// 撤销临时分享
     Revoking,
@@ -89,7 +106,12 @@ pub struct CrossAccountJob {
     pub source_uid: u64,
     pub target_uid: u64,
     pub paths: Vec<String>,
+    /// 目标账号中的保存目录（下载模式为空）
     pub target_dir: String,
+    /// 本地下载目录（仅下载模式）
+    pub local_download_path: Option<String>,
+    /// 目标账号上的转存任务 id（下载模式即分享直下任务，可在「转存管理」查看）
+    pub transfer_task_id: Option<String>,
     pub stage: CrossAccountStage,
     pub transferred_count: usize,
     pub total_count: usize,
@@ -122,6 +144,8 @@ impl CrossAccountJob {
             target_uid: target_uid.raw(),
             paths,
             target_dir,
+            local_download_path: None,
+            transfer_task_id: None,
             stage: CrossAccountStage::Checking,
             transferred_count: 0,
             total_count: 0,
@@ -132,6 +156,24 @@ impl CrossAccountJob {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// 下载模式：`target_uid` 为下载账号
+    pub fn new_download(
+        source_uid: Uid,
+        target_uid: Uid,
+        paths: Vec<String>,
+        local_download_path: String,
+    ) -> Self {
+        let mut job = Self::new(
+            CrossAccountMode::Download,
+            source_uid,
+            target_uid,
+            paths,
+            String::new(),
+        );
+        job.local_download_path = Some(local_download_path);
+        job
     }
 }
 
@@ -248,16 +290,14 @@ impl CrossAccountRegistry {
 /// 入参须已由 handler 校验：两个账号都存在且不同、路径已归一化。
 pub fn spawn_job(state: &AppState, job: CrossAccountJob) -> CrossAccountJob {
     info!(
-        "跨账号{}: job={} {} -> {} paths={:?} target_dir={}",
-        match job.mode {
-            CrossAccountMode::Copy => "复制",
-            CrossAccountMode::Move => "移动",
-        },
+        "跨账号{}: job={} {} -> {} paths={:?} target_dir={} local_download_path={:?}",
+        job.mode.label(),
         job.id,
         job.source_uid,
         job.target_uid,
         job.paths,
-        job.target_dir
+        job.target_dir,
+        job.local_download_path
     );
     state.cross_account_jobs.insert(job.clone());
     let state = state.clone();
@@ -272,8 +312,9 @@ async fn run_job(state: AppState, job: CrossAccountJob) {
     let source = Uid::new(job.source_uid);
     let target = Uid::new(job.target_uid);
 
-    // 0. 检查源文件都在、目标目录无同名项（分享转存遇同名直接失败，不会自动改名）
-    let items = match precheck(&state, source, target, &job.paths, &job.target_dir).await {
+    // 0. 检查源文件都在、目标目录无同名项（分享转存遇同名直接失败，不会自动改名）。
+    //    下载模式转存到每个任务独有的临时目录，不会冲突
+    let items = match precheck(&state, &job).await {
         Ok(items) => items,
         Err(msg) => {
             fail(&registry, &id, CrossAccountStage::Checking, msg);
@@ -300,9 +341,9 @@ async fn run_job(state: AppState, job: CrossAccountJob) {
         })
         .await;
 
-    // 2. 目标账号转存
+    // 2. 目标账号转存（下载模式：转存进临时目录后由分享直下自动下载）
     registry.set_stage(&id, CrossAccountStage::Transferring);
-    let outcome = transfer_into_target(&state, &id, target, &share.link, &pwd, &job.target_dir).await;
+    let outcome = transfer_into_target(&state, &job, &share.link, &pwd).await;
 
     // 3. 不论成败都撤销分享
     registry.set_stage(&id, CrossAccountStage::Revoking);
@@ -317,17 +358,41 @@ async fn run_job(state: AppState, job: CrossAccountJob) {
         ),
     }
 
-    let transfer_warning = match outcome {
-        TransferOutcome::Failed(msg) => {
+    let (status, transfer_warning) = match outcome {
+        Err(msg) => {
             fail(&registry, &id, CrossAccountStage::Transferring, msg);
             return;
         }
-        TransferOutcome::Clean => None,
-        TransferOutcome::Partial(msg) => Some(msg),
+        Ok(done) => done,
     };
+
+    // 分享直下的下载在本轮询看到「下载中」之前就整体失败了（如本地目录不可写）：
+    // 转存已成功、分享已撤销，按下载失败报告，步骤停在「开始下载」而不是「转存」。
+    // 复制 / 移动不自动下载，不会出现该状态
+    if status == TransferStatus::DownloadFailed {
+        fail(
+            &registry,
+            &id,
+            CrossAccountStage::Revoking,
+            format!(
+                "文件已转存到下载账号，但下载失败：{}。详情见「转存管理」「下载管理」",
+                transfer_warning.as_deref().unwrap_or("未知原因")
+            ),
+        );
+        return;
+    }
 
     if let Some(ref msg) = transfer_warning {
         registry.warn(&id, format!("部分文件未转存成功：{}", msg));
+    }
+
+    // 分享直下转存后停在「已转存」= 一个下载任务都没建出来（本地已有同名文件被跳过，
+    // 或创建失败），临时目录由分享直下按配置清理
+    if job.mode == CrossAccountMode::Download && status == TransferStatus::Transferred {
+        registry.warn(
+            &id,
+            "没有创建任何下载任务：所选文件可能已存在于本地下载目录，或下载任务创建失败".to_string(),
+        );
     }
 
     // 4. 移动：转存完全成功 + 目标逐项核对一致，才删源文件。
@@ -417,15 +482,22 @@ fn conflicting_names<'a>(items: &'a [SourceItem], existing: &HashSet<&str>) -> V
         .collect()
 }
 
-/// 建分享前的检查：源文件都在、目标目录存在且无同名项。返回源文件元信息供移动前核对
+/// 建分享前的检查：源文件都在；复制 / 移动还要求目标目录存在且无同名项。
+/// 返回源文件元信息供移动前核对
 ///
 /// `paths` 由 handler 保证同在一个父目录下。
-async fn precheck(
+async fn precheck(state: &AppState, job: &CrossAccountJob) -> Result<Vec<SourceItem>, String> {
+    let items = load_source_items(state, Uid::new(job.source_uid), &job.paths).await?;
+    if job.mode != CrossAccountMode::Download {
+        check_target_conflicts(state, Uid::new(job.target_uid), &items, &job.target_dir).await?;
+    }
+    Ok(items)
+}
+
+async fn load_source_items(
     state: &AppState,
     source: Uid,
-    target: Uid,
     paths: &[String],
-    target_dir: &str,
 ) -> Result<Vec<SourceItem>, String> {
     let parent = parent_dir(&paths[0]);
     let entries = list_dir(state, source, parent)
@@ -445,20 +517,28 @@ async fn precheck(
             size: f.size,
         });
     }
+    Ok(items)
+}
 
+async fn check_target_conflicts(
+    state: &AppState,
+    target: Uid,
+    items: &[SourceItem],
+    target_dir: &str,
+) -> Result<(), String> {
     let existing = list_dir(state, target, target_dir)
         .await
         .map_err(|e| format!("读取目标目录失败：{}", e))?
         .ok_or_else(|| format!("目标目录不存在：{}", target_dir))?;
     let names: HashSet<&str> = existing.iter().map(|f| f.server_filename.as_str()).collect();
-    let conflicts = conflicting_names(&items, &names);
+    let conflicts = conflicting_names(items, &names);
     if !conflicts.is_empty() {
         return Err(format!(
             "目标目录已存在同名项：{}。百度转存不会自动改名，请先重命名或换一个目标目录",
             conflicts.join("、")
         ));
     }
-    Ok(items)
+    Ok(())
 }
 
 /// 目录树汇总
@@ -594,31 +674,16 @@ fn share_set_error_message(errno: i32, errmsg: &str) -> String {
     format!("创建临时分享失败：{}", reason)
 }
 
-enum TransferOutcome {
-    /// 全部转存成功
-    Clean,
-    /// 已转存但有部分失败（携带说明）
-    Partial(String),
-    Failed(String),
-}
+/// 转存阶段结果：`Ok((结束时的状态, 部分失败说明))`，`Err` 为整体失败
+type TransferOutcome = Result<(TransferStatus, Option<String>), String>;
 
-async fn transfer_into_target(
-    state: &AppState,
-    job_id: &str,
-    target: Uid,
-    share_url: &str,
-    pwd: &str,
-    target_dir: &str,
-) -> TransferOutcome {
-    let Some(tm) = state.transfer_manager_for(target) else {
-        return TransferOutcome::Failed("目标账号转存管理器未初始化，请重新登录目标账号".into());
-    };
-    let req = CreateTransferRequest {
+fn build_transfer_request(job: &CrossAccountJob, share_url: &str, pwd: &str) -> CreateTransferRequest {
+    let base = CreateTransferRequest {
         share_url: share_url.to_string(),
         password: Some(pwd.to_string()),
         randsk: None,
         prefetched_share: None,
-        save_path: target_dir.to_string(),
+        save_path: job.target_dir.clone(),
         save_fs_id: 0,
         auto_download: Some(false),
         local_download_path: None,
@@ -626,49 +691,82 @@ async fn transfer_into_target(
         is_share_direct_download: false,
         selected_fs_ids: None,
         selected_files: None,
-        owner_uid_override: Some(target),
+        owner_uid_override: Some(Uid::new(job.target_uid)),
         // 内部任务：分享撤销后无法重试，不进「转存管理」
         is_internal: true,
-        backup_config_id: Some(format!("{}{}", INTERNAL_CONFIG_PREFIX, job_id)),
+        backup_config_id: Some(format!("{}{}", INTERNAL_CONFIG_PREFIX, job.id)),
     };
-    let task_id = match tm.create_task(req).await {
-        Ok(resp) => match (resp.task_id, resp.error) {
-            (_, Some(err)) => return TransferOutcome::Failed(format!("转存失败：{}", err)),
-            (Some(id), None) => id,
-            (None, None) => return TransferOutcome::Failed("转存失败：未返回任务 ID".into()),
+    match job.mode {
+        CrossAccountMode::Copy | CrossAccountMode::Move => base,
+        // 普通的分享直下任务：在「转存管理」「下载管理」可见，下载进度、重试、临时目录
+        // 清理全部沿用分享直下。不能带 backup_config_id，否则衍生下载会走
+        // create_backup_task，被当成分享同步的隐藏下载
+        CrossAccountMode::Download => CreateTransferRequest {
+            save_path: String::new(),
+            auto_download: Some(true),
+            local_download_path: job.local_download_path.clone(),
+            is_share_direct_download: true,
+            is_internal: false,
+            backup_config_id: None,
+            ..base
         },
-        Err(e) => return TransferOutcome::Failed(format!("转存失败：{:#}", e)),
+    }
+}
+
+/// 转存任务走完转存阶段后返回结果，否则 `None`。转存阶段之后的步骤（下载、清理
+/// 临时目录）只读写目标账号自己的网盘，不再访问分享，此时即可撤销分享
+///
+/// `DownloadFailed` 只会在下载开始之后出现，说明转存本身已成功，归入 `Ok`，
+/// 由调用方按「下载失败」处理（此时 error 是下载错误，不是转存的部分失败说明）
+fn transfer_phase_outcome(status: &TransferStatus, error: Option<String>) -> Option<TransferOutcome> {
+    match status {
+        TransferStatus::Queued | TransferStatus::CheckingShare | TransferStatus::Transferring => None,
+        TransferStatus::TransferFailed => Some(Err(error.unwrap_or_else(|| "转存失败".to_string()))),
+        TransferStatus::Transferred
+        | TransferStatus::Downloading
+        | TransferStatus::DownloadFailed
+        | TransferStatus::Cleaning
+        | TransferStatus::Completed => Some(Ok((status.clone(), error))),
+    }
+}
+
+async fn transfer_into_target(
+    state: &AppState,
+    job: &CrossAccountJob,
+    share_url: &str,
+    pwd: &str,
+) -> TransferOutcome {
+    let Some(tm) = state.transfer_manager_for(Uid::new(job.target_uid)) else {
+        return Err("目标账号转存管理器未初始化，请重新登录目标账号".into());
+    };
+    let task_id = match tm.create_task(build_transfer_request(job, share_url, pwd)).await {
+        Ok(resp) => match (resp.task_id, resp.error) {
+            (_, Some(err)) => return Err(format!("转存失败：{}", err)),
+            (Some(id), None) => id,
+            (None, None) => return Err("转存失败：未返回任务 ID".into()),
+        },
+        Err(e) => return Err(format!("转存失败：{:#}", e)),
     };
 
     let registry = &state.cross_account_jobs;
+    registry.update(&job.id, |j| j.transfer_task_id = Some(task_id.clone()));
     let started = tokio::time::Instant::now();
     loop {
         let Some(task) = tm.get_task(&task_id).await else {
-            return TransferOutcome::Failed("转存任务丢失".into());
+            return Err("转存任务丢失（可能已被删除）".into());
         };
-        registry.update(job_id, |j| {
+        registry.update(&job.id, |j| {
             j.transferred_count = task.transferred_count;
             j.total_count = task.total_count;
         });
-        match task.status {
-            TransferStatus::Transferred | TransferStatus::Completed => {
-                return match task.error {
-                    Some(warning) => TransferOutcome::Partial(warning),
-                    None => TransferOutcome::Clean,
-                };
-            }
-            TransferStatus::TransferFailed | TransferStatus::DownloadFailed => {
-                return TransferOutcome::Failed(
-                    task.error.unwrap_or_else(|| "转存失败".to_string()),
-                );
-            }
-            _ => {}
+        if let Some(outcome) = transfer_phase_outcome(&task.status, task.error) {
+            return outcome;
         }
         if started.elapsed() > TRANSFER_HARD_TIMEOUT {
             if let Err(e) = tm.cancel_task(&task_id).await {
                 warn!("取消超时的跨账号转存任务失败: {}", e);
             }
-            return TransferOutcome::Failed("转存超时".into());
+            return Err("转存超时".into());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
@@ -874,5 +972,61 @@ mod tests {
         assert_eq!(v["mode"], "move");
         assert_eq!(v["stage"], "checking");
         assert_eq!(v["source_deleted"], false);
+        assert!(v["local_download_path"].is_null());
+
+        let d = CrossAccountJob::new_download(Uid::new(1), Uid::new(2), vec!["/a".into()], "D:/dl".into());
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["mode"], "download");
+        assert_eq!(v["target_dir"], "");
+        assert_eq!(v["local_download_path"], "D:/dl");
+    }
+
+    #[test]
+    fn transfer_phase_outcome_waits_until_transfer_done() {
+        use TransferStatus::*;
+        for s in [Queued, CheckingShare, Transferring] {
+            assert!(transfer_phase_outcome(&s, None).is_none(), "{:?}", s);
+        }
+        for s in [Transferred, Downloading, DownloadFailed, Cleaning, Completed] {
+            assert_eq!(transfer_phase_outcome(&s, None), Some(Ok((s.clone(), None))));
+        }
+        assert_eq!(
+            transfer_phase_outcome(&Downloading, Some("2 个失败".into())),
+            Some(Ok((Downloading, Some("2 个失败".into()))))
+        );
+        assert_eq!(
+            transfer_phase_outcome(&TransferFailed, Some("空间不足".into())),
+            Some(Err("空间不足".into()))
+        );
+        assert_eq!(transfer_phase_outcome(&TransferFailed, None), Some(Err("转存失败".into())));
+    }
+
+    #[test]
+    fn transfer_request_per_mode() {
+        let copy = CrossAccountJob::new(
+            CrossAccountMode::Copy,
+            Uid::new(1),
+            Uid::new(2),
+            vec!["/a".into()],
+            "/dst".into(),
+        );
+        let req = build_transfer_request(&copy, "https://pan.baidu.com/s/1x", "abcd");
+        assert!(req.is_internal);
+        assert!(!req.is_share_direct_download);
+        assert_eq!(req.auto_download, Some(false));
+        assert_eq!(req.save_path, "/dst");
+        assert_eq!(req.backup_config_id, Some(format!("{}{}", INTERNAL_CONFIG_PREFIX, copy.id)));
+        assert_eq!(req.owner_uid_override, Some(Uid::new(2)));
+        assert_eq!(req.password.as_deref(), Some("abcd"));
+
+        let dl = CrossAccountJob::new_download(Uid::new(1), Uid::new(2), vec!["/a".into()], "D:/dl".into());
+        let req = build_transfer_request(&dl, "https://pan.baidu.com/s/1x", "abcd");
+        assert!(!req.is_internal);
+        assert!(req.is_share_direct_download);
+        assert_eq!(req.auto_download, Some(true));
+        assert_eq!(req.local_download_path.as_deref(), Some("D:/dl"));
+        // 带 backup_config_id 会让衍生下载变成分享同步的隐藏下载
+        assert!(req.backup_config_id.is_none());
+        assert_eq!(req.owner_uid_override, Some(Uid::new(2)));
     }
 }

@@ -1,4 +1,4 @@
-// 跨账号复制 / 移动 API 处理器
+// 跨账号复制 / 移动 / 下载 API 处理器
 
 use crate::auth::Uid;
 use crate::cross_account::{self, CrossAccountJob, CrossAccountMode};
@@ -12,17 +12,22 @@ use axum::{
 use serde::Deserialize;
 use std::collections::HashSet;
 
-/// 创建跨账号复制 / 移动任务请求
+/// 创建跨账号复制 / 移动 / 下载任务请求
 #[derive(Debug, Deserialize)]
 pub struct CreateCrossAccountJobRequest {
     /// 源账号；缺省为当前活跃账号
     #[serde(default)]
     pub source_uid: Option<u64>,
+    /// 目标账号（下载模式为负责下载的账号）
     pub target_uid: u64,
     /// 源账号中的文件 / 文件夹路径
     pub paths: Vec<String>,
-    /// 目标账号中的保存目录
+    /// 目标账号中的保存目录（复制 / 移动必填）
+    #[serde(default)]
     pub target_dir: String,
+    /// 本地下载目录（下载模式必填）
+    #[serde(default)]
+    pub local_download_path: Option<String>,
     pub mode: CrossAccountMode,
 }
 
@@ -37,8 +42,24 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
-/// 校验并归一化请求路径，返回 (paths, target_dir)
-fn validate_paths(paths: &[String], target_dir: &str) -> Result<(Vec<String>, String), String> {
+/// 校验请求字段并按模式建任务（账号是否存在由调用方另行校验）
+fn build_job(req: &CreateCrossAccountJobRequest, source: Uid, target: Uid) -> Result<CrossAccountJob, String> {
+    let paths = validate_source_paths(&req.paths)?;
+    if req.mode == CrossAccountMode::Download {
+        let local = req.local_download_path.as_deref().map(str::trim).unwrap_or_default();
+        if local.is_empty() {
+            return Err("请选择本地下载目录".to_string());
+        }
+        return Ok(CrossAccountJob::new_download(source, target, paths, local.to_string()));
+    }
+    if !req.target_dir.trim().starts_with('/') {
+        return Err(format!("目标目录必须以 / 开头: {}", req.target_dir));
+    }
+    Ok(CrossAccountJob::new(req.mode, source, target, paths, normalize_path(&req.target_dir)))
+}
+
+/// 校验并归一化源路径
+fn validate_source_paths(paths: &[String]) -> Result<Vec<String>, String> {
     if paths.is_empty() {
         return Err("请选择要操作的文件".to_string());
     }
@@ -61,26 +82,18 @@ fn validate_paths(paths: &[String], target_dir: &str) -> Result<(Vec<String>, St
     // （["/x/a.txt", "/y/a.txt"] 转存到同一目标目录必然冲突）。
     let parent = cross_account::parent_dir(&normalized[0]);
     if normalized.iter().any(|p| cross_account::parent_dir(p) != parent) {
-        return Err("跨账号复制/移动只支持同一目录下的文件，跨目录的搜索结果请分批操作".to_string());
+        return Err("跨账号操作只支持同一目录下的文件，跨目录的搜索结果请分批操作".to_string());
     }
-    if !target_dir.trim().starts_with('/') {
-        return Err(format!("目标目录必须以 / 开头: {}", target_dir));
-    }
-    Ok((normalized, normalize_path(target_dir)))
+    Ok(normalized)
 }
 
-/// 创建跨账号复制 / 移动任务（后台执行，立即返回任务快照）
+/// 创建跨账号复制 / 移动 / 下载任务（后台执行，立即返回任务快照）
 ///
 /// POST /api/v1/cross-account/jobs
 pub async fn create_cross_account_job(
     State(state): State<AppState>,
     Json(req): Json<CreateCrossAccountJobRequest>,
 ) -> Result<Json<ApiResponse<CrossAccountJob>>, StatusCode> {
-    let (paths, target_dir) = match validate_paths(&req.paths, &req.target_dir) {
-        Ok(v) => v,
-        Err(msg) => return Ok(Json(ApiResponse::error(400, msg))),
-    };
-
     let source = match req.source_uid {
         Some(raw) => Uid::new(raw),
         None => match *state.active_uid.read().await {
@@ -89,13 +102,22 @@ pub async fn create_cross_account_job(
         },
     };
     let target = Uid::new(req.target_uid);
+    let job = match build_job(&req, source, target) {
+        Ok(job) => job,
+        Err(msg) => return Ok(Json(ApiResponse::error(400, msg))),
+    };
     if source == target {
-        return Ok(Json(ApiResponse::error(
-            400,
-            "源账号与目标账号相同，请使用普通的复制 / 移动".to_string(),
-        )));
+        let msg = match req.mode {
+            CrossAccountMode::Download => "下载账号与文件所属账号相同，请直接下载",
+            _ => "源账号与目标账号相同，请使用普通的复制 / 移动",
+        };
+        return Ok(Json(ApiResponse::error(400, msg.to_string())));
     }
-    for (uid, label) in [(source, "源账号"), (target, "目标账号")] {
+    let target_label = match req.mode {
+        CrossAccountMode::Download => "下载账号",
+        _ => "目标账号",
+    };
+    for (uid, label) in [(source, "源账号"), (target, target_label)] {
         if state.client_for_or_active(Some(uid)).await.is_none() {
             return Ok(Json(ApiResponse::error(
                 400,
@@ -110,7 +132,6 @@ pub async fn create_cross_account_job(
         )));
     }
 
-    let job = CrossAccountJob::new(req.mode, source, target, paths, target_dir);
     Ok(Json(ApiResponse::success(cross_account::spawn_job(&state, job))))
 }
 
@@ -140,42 +161,72 @@ pub async fn list_cross_account_jobs(
 mod tests {
     use super::*;
 
+    fn req(json: &str) -> CreateCrossAccountJobRequest {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn build(json: &str) -> Result<CrossAccountJob, String> {
+        build_job(&req(json), Uid::new(1), Uid::new(2))
+    }
+
     #[test]
-    fn validate_paths_normalizes_and_dedups() {
-        let (paths, dir) =
-            validate_paths(&["/a/b/".into(), "/a/b".into(), "/a/c".into()], "/dst/").unwrap();
+    fn source_paths_normalize_and_dedup() {
+        let paths = validate_source_paths(&["/a/b/".into(), "/a/b".into(), "/a/c".into()]).unwrap();
         assert_eq!(paths, vec!["/a/b".to_string(), "/a/c".to_string()]);
-        assert_eq!(dir, "/dst");
-        let (_, root) = validate_paths(&["/a".into()], "/").unwrap();
-        assert_eq!(root, "/");
     }
 
     #[test]
-    fn validate_paths_requires_same_parent() {
+    fn source_paths_require_same_parent() {
         // 父子重叠
-        assert!(validate_paths(&["/d".into(), "/d/a.txt".into()], "/").is_err());
+        assert!(validate_source_paths(&["/d".into(), "/d/a.txt".into()]).is_err());
         // 跨目录同名
-        assert!(validate_paths(&["/x/a.txt".into(), "/y/a.txt".into()], "/").is_err());
+        assert!(validate_source_paths(&["/x/a.txt".into(), "/y/a.txt".into()]).is_err());
         // 同目录多选、根目录多选
-        assert!(validate_paths(&["/d/a".into(), "/d/b".into()], "/").is_ok());
-        assert!(validate_paths(&["/a".into(), "/b".into()], "/").is_ok());
+        assert!(validate_source_paths(&["/d/a".into(), "/d/b".into()]).is_ok());
+        assert!(validate_source_paths(&["/a".into(), "/b".into()]).is_ok());
     }
 
     #[test]
-    fn validate_paths_rejects_bad_input() {
-        assert!(validate_paths(&[], "/").is_err());
-        assert!(validate_paths(&["a/b".into()], "/").is_err());
-        assert!(validate_paths(&["/".into()], "/").is_err());
-        assert!(validate_paths(&["/a".into()], "dst").is_err());
+    fn source_paths_reject_bad_input() {
+        assert!(validate_source_paths(&[]).is_err());
+        assert!(validate_source_paths(&["a/b".into()]).is_err());
+        assert!(validate_source_paths(&["/".into()]).is_err());
+    }
+
+    #[test]
+    fn build_copy_move_job_normalizes_target_dir() {
+        let job = build(r#"{"target_uid":2,"paths":["/a"],"target_dir":"/dst/","mode":"move"}"#).unwrap();
+        assert_eq!(job.mode, CrossAccountMode::Move);
+        assert_eq!(job.target_dir, "/dst");
+        assert!(job.local_download_path.is_none());
+        let job = build(r#"{"target_uid":2,"paths":["/a"],"target_dir":"/","mode":"copy"}"#).unwrap();
+        assert_eq!(job.target_dir, "/");
+        // 复制 / 移动必须给出网盘目录
+        assert!(build(r#"{"target_uid":2,"paths":["/a"],"target_dir":"dst","mode":"copy"}"#).is_err());
+        assert!(build(r#"{"target_uid":2,"paths":["/a"],"mode":"copy"}"#).is_err());
+    }
+
+    #[test]
+    fn build_download_job_requires_local_path() {
+        let job = build(
+            r#"{"target_uid":2,"paths":["/d/a","/d/b"],"local_download_path":" D:/dl ","mode":"download"}"#,
+        )
+            .unwrap();
+        assert_eq!(job.mode, CrossAccountMode::Download);
+        assert_eq!(job.paths, vec!["/d/a".to_string(), "/d/b".to_string()]);
+        assert_eq!(job.local_download_path.as_deref(), Some("D:/dl"));
+        assert_eq!(job.target_dir, "");
+        assert!(build(r#"{"target_uid":2,"paths":["/a"],"mode":"download"}"#).is_err());
+        assert!(build(r#"{"target_uid":2,"paths":["/a"],"local_download_path":"  ","mode":"download"}"#).is_err());
+        // 源路径规则对下载同样适用
+        assert!(build(r#"{"target_uid":2,"paths":["/x/a","/y/b"],"local_download_path":"D:/dl","mode":"download"}"#).is_err());
     }
 
     #[test]
     fn request_mode_deserializes() {
-        let req: CreateCrossAccountJobRequest = serde_json::from_str(
-            r#"{"target_uid":2,"paths":["/a"],"target_dir":"/","mode":"move"}"#,
-        )
-        .unwrap();
-        assert_eq!(req.mode, CrossAccountMode::Move);
-        assert!(req.source_uid.is_none());
+        let r = req(r#"{"target_uid":2,"paths":["/a"],"target_dir":"/","mode":"move"}"#);
+        assert_eq!(r.mode, CrossAccountMode::Move);
+        assert!(r.source_uid.is_none());
+        assert_eq!(req(r#"{"target_uid":2,"paths":["/a"],"mode":"download"}"#).mode, CrossAccountMode::Download);
     }
 }
