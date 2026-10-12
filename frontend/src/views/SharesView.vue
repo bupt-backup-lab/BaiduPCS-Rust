@@ -72,7 +72,7 @@
       </el-table-column>
       <el-table-column label="过期时间" width="160">
         <template #default="{ row }">
-          {{ formatExpireTime(row.expiredTime) }}
+          {{ formatExpireTime(row) }}
         </template>
       </el-table-column>
       <el-table-column label="操作" width="220" fixed="right">
@@ -121,7 +121,7 @@
           </div>
           <div class="info-row">
             <span class="label">过期:</span>
-            <span class="value">{{ formatExpireTime(item.expiredTime) }}</span>
+            <span class="value">{{ formatExpireTime(item) }}</span>
           </div>
         </div>
 
@@ -276,7 +276,12 @@ function getStatusText(status: number): string {
 }
 
 // 格式化过期时间
-function formatExpireTime(timestamp: number): string {
+function formatExpireTime(record: ShareRecord): string {
+  if (record.expiredType === -1) {
+    return '已过期'
+  }
+
+  const timestamp = record.expiredTime
   if (!timestamp || timestamp === 0) {
     return '永久有效'
   }
