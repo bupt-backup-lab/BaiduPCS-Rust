@@ -200,6 +200,14 @@ export interface ShareSyncConfig {
   exclude_preset_rules: string[]
 }
 
+/// 界面偏好配置
+export interface UiConfig {
+  /** 页面切换后返回「网盘管理」时保留上次浏览的目录（按账号分别记忆），默认开启 */
+  remember_netdisk_path: boolean
+  /** 顶部栏显示多账号横向快捷切换条，默认关闭 */
+  account_quick_bar: boolean
+}
+
 /// 应用配置
 export interface AppConfig {
   server: ServerConfig
@@ -217,6 +225,7 @@ export interface AppConfig {
   multi_account_budget?: MultiAccountBudgetConfig
   multi_account_vip_recommended?: MultiAccountVipRecommendedConfig
   share_sync?: ShareSyncConfig
+  ui?: UiConfig
 }
 
 /// VIP 推荐配置

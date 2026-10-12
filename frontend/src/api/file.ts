@@ -95,6 +95,40 @@ export async function getFileList(
   return response.data.data
 }
 
+/** 百度 errno -9：文件或目录不存在（列表接口的错误文案形如 `API error -9: `） */
+export function isNotFoundError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  return /API error -9\b|errno=-9\b/.test(message)
+}
+
+/** 网盘文件定位结果 */
+export type LocateFileResult = 'found' | 'dir_not_found' | 'file_not_found'
+
+/** 定位翻页查找的每页条数 / 最大页数（与网盘管理页一致：按文件名升序、每页 50 条） */
+export const LOCATE_PAGE_SIZE = 50
+export const LOCATE_MAX_PAGES = 20
+
+/**
+ * 检查网盘中文件是否存在（翻页查找所在目录，不切换活跃账号）
+ * @param uid 文件所属账号；缺省为活跃账号
+ * @throws 目录不存在以外的错误（网络、登录失效等）
+ */
+export async function locateNetdiskFile(path: string, uid?: number | null): Promise<LocateFileResult> {
+  const dir = dirname(path)
+  for (let page = 1; page <= LOCATE_MAX_PAGES; page++) {
+    let data: FileListData
+    try {
+      data = await getFileList(dir, page, LOCATE_PAGE_SIZE, 'name', false, uid)
+    } catch (error) {
+      if (isNotFoundError(error)) return 'dir_not_found'
+      throw error
+    }
+    if (data.list.some((f) => f.path === path)) return 'found'
+    if (!data.has_more) break
+  }
+  return 'file_not_found'
+}
+
 /**
  * 获取下载链接
  */

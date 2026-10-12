@@ -1,4 +1,4 @@
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick, ref } from 'vue'
 import ElementPlus from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -22,6 +22,39 @@ vi.mock('@/stores/auth', () => ({
   useAuthStore: () => auth,
 }))
 
+// 路由：默认无定位 query；定位用例临时写入
+const routeState = vi.hoisted(() => ({ path: '/files', query: {} as Record<string, string> }))
+const routerMock = vi.hoisted(() => ({ replace: vi.fn() }))
+
+vi.mock('vue-router', () => ({
+  useRoute: () => routeState,
+  useRouter: () => routerMock,
+}))
+
+// 界面偏好：默认开启目录记忆，记忆表每个用例前清空
+const uiPrefs = vi.hoisted(() => {
+  const dirs = new Map<number, string>()
+  return {
+    rememberNetdiskPath: true,
+    dirs,
+    getLastNetdiskDir: (uid: number | null) => dirs.get(uid ?? 0) ?? null,
+    setLastNetdiskDir: (uid: number | null, dir: string) => {
+      dirs.set(uid ?? 0, dir)
+    },
+  }
+})
+
+vi.mock('@/stores/uiPrefs', () => ({
+  useUiPrefsStore: () => uiPrefs,
+}))
+
+beforeEach(() => {
+  uiPrefs.dirs.clear()
+  uiPrefs.rememberNetdiskPath = true
+  routeState.query = {}
+  routerMock.replace.mockReset()
+})
+
 vi.mock('@/api/file', () => ({
   getFileList: vi.fn().mockResolvedValue({
     list: [],
@@ -42,6 +75,8 @@ vi.mock('@/api/file', () => ({
   copyFiles: vi.fn(),
   moveFiles: vi.fn(),
   FILE_EXISTS_ERROR_CODE: -8,
+  isNotFoundError: vi.fn((e: unknown) => /API error -9\b/.test(String((e as Error)?.message ?? e))),
+  LOCATE_MAX_PAGES: 20,
 }))
 
 vi.mock('@/api/download', () => ({
@@ -624,6 +659,141 @@ describe('FilesView 复制/移动同名冲突', () => {
     expect(copyFiles).toHaveBeenCalledTimes(1)
     // @ts-expect-error setup 内部状态
     expect(wrapper.vm.batchCopying).toBe(false)
+
+    wrapper.unmount()
+  })
+})
+
+describe('FilesView 目录记忆与定位', () => {
+  function mountFilesView() {
+    return mount(FilesView, {
+      attachTo: document.body,
+      global: {
+        plugins: [ElementPlus],
+        stubs: {
+          'el-table': true,
+          'el-table-column': true,
+          FilePickerModal: true,
+          TransferDialog: true,
+          ShareDialog: true,
+          ShareDirectDownloadDialog: true,
+          NetdiskFolderPickerModal: true,
+        },
+      },
+    })
+  }
+
+  function file(path: string) {
+    const name = path.slice(path.lastIndexOf('/') + 1)
+    return {
+      fs_id: path.length,
+      path,
+      server_filename: name,
+      size: 1,
+      isdir: 0,
+      category: 4,
+      server_ctime: 0,
+      server_mtime: 0,
+      local_ctime: 0,
+      local_mtime: 0,
+    }
+  }
+
+  async function requestedDirs() {
+    const { getFileList } = await import('@/api/file')
+    return vi.mocked(getFileList).mock.calls.map((c) => c[0])
+  }
+
+  beforeEach(async () => {
+    const { getFileList } = await import('@/api/file')
+    vi.mocked(getFileList).mockClear()
+  })
+
+  it('开启记忆时回到该账号上次浏览的目录，并记录新进入的目录', async () => {
+    uiPrefs.dirs.set(1, '/a/b')
+    const wrapper = mountFilesView()
+    await flushPromises()
+    expect(await requestedDirs()).toEqual(['/a/b'])
+
+    // @ts-expect-error setup 内部方法
+    wrapper.vm.navigateToDir('/c')
+    await flushPromises()
+    expect(uiPrefs.dirs.get(1)).toBe('/c')
+
+    wrapper.unmount()
+  })
+
+  it('关闭记忆时始终从根目录开始', async () => {
+    uiPrefs.rememberNetdiskPath = false
+    uiPrefs.dirs.set(1, '/a/b')
+    const wrapper = mountFilesView()
+    await flushPromises()
+    expect(await requestedDirs()).toEqual(['/'])
+    wrapper.unmount()
+  })
+
+  it('记忆的目录已不存在时回退到最近的上级目录', async () => {
+    const { getFileList } = await import('@/api/file')
+    vi.mocked(getFileList)
+        .mockRejectedValueOnce(new Error('获取文件列表失败: API error -9: '))
+        .mockRejectedValueOnce(new Error('获取文件列表失败: API error -9: '))
+    uiPrefs.dirs.set(1, '/a/b/gone')
+    const wrapper = mountFilesView()
+    await flushPromises()
+    expect(await requestedDirs()).toEqual(['/a/b/gone', '/a/b', '/a'])
+    expect(uiPrefs.dirs.get(1)).toBe('/a')
+    wrapper.unmount()
+  })
+
+  it('非「目录不存在」的错误不逐级上探，直接回到根目录', async () => {
+    const { getFileList } = await import('@/api/file')
+    vi.mocked(getFileList)
+        .mockRejectedValueOnce(new Error('获取文件列表失败: API error -9: '))
+        .mockRejectedValueOnce(new Error('网络错误'))
+    uiPrefs.dirs.set(1, '/a/b/gone')
+    const wrapper = mountFilesView()
+    await flushPromises()
+    expect(await requestedDirs()).toEqual(['/a/b/gone', '/a/b', '/'])
+    wrapper.unmount()
+  })
+
+  it('定位的上传目录已不存在：打开最近的上级目录', async () => {
+    const { getFileList } = await import('@/api/file')
+    vi.mocked(getFileList).mockRejectedValueOnce(new Error('获取文件列表失败: API error -9: '))
+    routeState.query = { path: '/测试2-1', highlight: '/测试2-1/dummy_1.txt' }
+    const wrapper = mountFilesView()
+    await flushPromises()
+    expect(await requestedDirs()).toEqual(['/测试2-1', '/'])
+    // @ts-expect-error setup 内部状态
+    expect(wrapper.vm.currentDir).toBe('/')
+    // @ts-expect-error setup 内部状态
+    expect(wrapper.vm.locatedPath).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('定位请求：打开目标目录，翻页找到文件后高亮，并清掉 query', async () => {
+    const { getFileList } = await import('@/api/file')
+    vi.mocked(getFileList)
+        .mockResolvedValueOnce({ list: [file('/up/a.txt')], has_more: true, page: 1 } as any)
+        .mockResolvedValueOnce({ list: [file('/up/b.txt')], has_more: false, page: 2 } as any)
+    uiPrefs.dirs.set(1, '/elsewhere')
+    routeState.query = { path: '/up', highlight: '/up/b.txt' }
+
+    const wrapper = mountFilesView()
+    await flushPromises()
+
+    expect(await requestedDirs()).toEqual(['/up', '/up'])
+    expect(vi.mocked(getFileList).mock.calls.map((c) => c[1])).toEqual([1, 2])
+    expect(routerMock.replace).toHaveBeenCalledWith({ path: '/files' })
+    // @ts-expect-error setup 内部状态
+    expect(wrapper.vm.locatedPath).toBe('/up/b.txt')
+
+    // 切换目录后高亮清除
+    // @ts-expect-error setup 内部方法
+    wrapper.vm.navigateToDir('/')
+    await flushPromises()
+    // @ts-expect-error setup 内部状态
+    expect(wrapper.vm.locatedPath).toBeNull()
 
     wrapper.unmount()
   })

@@ -102,6 +102,33 @@
                   </el-form-item>
                 </el-card>
 
+                <!-- 界面偏好 -->
+                <el-card id="section-ui" class="setting-card" shadow="hover">
+                  <template #header>
+                    <div class="card-header">
+                      <el-icon :size="20" color="#409eff">
+                        <Operation />
+                      </el-icon>
+                      <span>界面偏好</span>
+                    </div>
+                  </template>
+
+                  <el-form-item label="保留网盘目录">
+                    <el-switch v-model="formData.ui!.remember_netdisk_path" />
+                    <div class="form-tip">
+                      开启后，从其他页面切回「网盘管理」时回到上次浏览的目录（按账号分别记忆，刷新页面后回到根目录）；
+                      关闭则每次回到根目录
+                    </div>
+                  </el-form-item>
+
+                  <el-form-item label="账号快捷切换条">
+                    <el-switch v-model="formData.ui!.account_quick_bar" />
+                    <div class="form-tip">
+                      开启后，登录多个账号时在顶部栏横向列出所有账号，点击即可切换（原头像下拉菜单保留；手机端不显示）
+                    </div>
+                  </el-form-item>
+                </el-card>
+
                 <!-- Web 访问认证设置 -->
                 <div id="section-auth">
                   <AuthSettingsSection />
@@ -1081,6 +1108,7 @@ import {
   ArrowDown,
   Promotion,
   QuestionFilled,
+  Operation,
 } from '@element-plus/icons-vue'
 import { getTransferConfig, updateTransferConfig } from '@/api/config'
 import { cleanupOrphanedTempDirs } from '@/api/transfer'
@@ -1152,6 +1180,7 @@ const navItems = [
   { id: 'section-accounts', label: '账号管理', color: '#409eff' },
   { id: 'section-budget', label: '资源配额', color: '#9b59b6' },
   { id: 'section-server', label: '服务器', color: '#409eff' },
+  { id: 'section-ui', label: '界面偏好', color: '#409eff' },
   { id: 'section-auth', label: '访问认证', color: '#e6a23c' },
   { id: 'section-download', label: '下载', color: '#67c23a' },
   { id: 'section-upload', label: '上传', color: '#e6a23c' },
@@ -1291,6 +1320,14 @@ async function loadConfig() {
     // 初始化分享同步配置（老后端不返回该段时兜底为空词表）
     if (formData.value && !formData.value.share_sync) {
       formData.value.share_sync = { exclude_preset_rules: [] }
+    }
+
+    // 初始化界面偏好（老后端不返回该段时用默认值）
+    if (formData.value) {
+      formData.value.ui = {
+        remember_netdisk_path: formData.value.ui?.remember_netdisk_path ?? true,
+        account_quick_bar: formData.value.ui?.account_quick_bar ?? false,
+      }
     }
 
     // 初始化代理配置状态

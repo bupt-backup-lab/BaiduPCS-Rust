@@ -320,7 +320,7 @@
             v-for="item in fileList"
             :key="item.fs_id"
             class="mobile-file-card"
-            :class="{ 'is-folder': item.isdir === 1 }"
+            :class="{ 'is-folder': item.isdir === 1, 'row-located': item.path === locatedPath }"
             @click="handleRowClick(item)"
             @contextmenu.prevent="openContextMenu($event.clientX, $event.clientY, [item])"
         >
@@ -530,7 +530,8 @@
 </template>
 
 <script setup lang="ts">
-import {ref, onMounted, onBeforeUnmount, computed, nextTick} from 'vue'
+import {ref, onMounted, onBeforeUnmount, computed, nextTick, watch} from 'vue'
+import {useRoute, useRouter} from 'vue-router'
 import {ElMessage, ElMessageBox} from 'element-plus'
 import type {InputInstance, TableInstance} from 'element-plus'
 import {
@@ -547,6 +548,8 @@ import {
   joinPath,
   basename,
   dirname,
+  isNotFoundError,
+  LOCATE_MAX_PAGES,
   FILE_EXISTS_ERROR_CODE,
   type FileItem,
   type FileOperationItem,
@@ -559,6 +562,7 @@ import FileConflictDialog, {type ConflictChoice, type ConflictEntry} from '@/com
 import CrossAccountTransferDialog from '@/components/CrossAccountTransferDialog.vue'
 import type {CrossAccountJob, CrossAccountMode} from '@/api/crossAccount'
 import {useAuthStore} from '@/stores/auth'
+import {useUiPrefsStore} from '@/stores/uiPrefs'
 import {
   CopyDocument as CopyDocumentIcon,
   Delete as DeleteIcon,
@@ -586,6 +590,10 @@ import type {FileEntry} from '@/api/filesystem'
 
 // 响应式检测
 const isMobile = useIsMobile()
+
+const route = useRoute()
+const router = useRouter()
+const uiPrefsStore = useUiPrefsStore()
 
 // 下载配置状态
 const downloadConfig = ref<DownloadConfig | null>(null)
@@ -698,6 +706,9 @@ const searchWrapperRef = ref<HTMLElement | null>(null)
 // 请求版本号，用于取消过期的请求回调
 let fileRequestVersion = 0
 
+// 「定位到网盘」高亮的文件路径（从上传管理跳转过来时设置，切换目录后清除）
+const locatedPath = ref<string | null>(null)
+
 // 路径分割
 const pathParts = computed(() => {
   if (currentDir.value === '/') return []
@@ -718,16 +729,26 @@ function normalizeDirPath(p: string): string {
   return trimmed === '' ? '/' : trimmed
 }
 
-// 加载文件列表
-async function loadFiles(dir: string, append: boolean = false) {
-  if (append && (loadingMore.value || !hasMore.value)) return
+// 目录列表加载结果：not_found 为百度 errno -9（目录不存在）；被更新请求取代或无需加载均视为 ok
+type LoadResult = 'ok' | 'not_found' | 'error'
+
+// 加载文件列表；silent 时失败不弹错误提示，由调用方处理
+async function loadFiles(
+    dir: string,
+    append: boolean = false,
+    options: { silent?: boolean } = {},
+): Promise<LoadResult> {
+  if (append && (loadingMore.value || !hasMore.value)) return 'ok'
   const version = ++fileRequestVersion
+  // 请求发起时的账号：记忆目录按账号区分
+  const ownerUid = authStore.activeUid
 
   if (append) {
     loadingMore.value = true
   } else {
     loading.value = true
     pendingDir.value = dir
+    locatedPath.value = null
     // 切换目录/刷新时，清掉可能残留的分页 loading，避免被上一目录的在途分页请求
     // 卡住（其回调因版本过期而不再复位 loadingMore）
     loadingMore.value = false
@@ -740,26 +761,31 @@ async function loadFiles(dir: string, append: boolean = false) {
 
   try {
     const data = await getFileList(dir, requestPage, 50, sortOrder.value, sortDesc.value)
-    if (version !== fileRequestVersion) return
+    if (version !== fileRequestVersion) return 'ok'
 
     if (append) {
       // 防御：追加结果必须仍属于当前目录，避免旧目录的分页请求覆盖/污染已跳转的目录
       // 使用归一化比较，兼容潜在的尾斜杠等路径格式差异
-      if (normalizeDirPath(dir) !== normalizeDirPath(currentDir.value)) return
+      if (normalizeDirPath(dir) !== normalizeDirPath(currentDir.value)) return 'ok'
       fileList.value = [...fileList.value, ...data.list]
     } else {
       fileList.value = data.list
       currentDir.value = dir
+      uiPrefsStore.setLastNetdiskDir(ownerUid, dir)
     }
 
     hasMore.value = data.has_more
     currentPage.value = data.page
+    return 'ok'
   } catch (error: any) {
-    if (version !== fileRequestVersion) return
+    if (version !== fileRequestVersion) return 'ok'
     // 失败时停止继续加载，避免滚动加载在出错后不断 page+1 重发造成死循环
     hasMore.value = false
-    ElMessage.error(error.message || '加载文件列表失败')
+    if (!options.silent) {
+      ElMessage.error(error.message || '加载文件列表失败')
+    }
     console.error('加载文件列表失败:', error)
+    return isNotFoundError(error) ? 'not_found' : 'error'
   } finally {
     if (version === fileRequestVersion) {
       loading.value = false
@@ -842,7 +868,10 @@ function handleRowClick(row: FileItem) {
 
 // 行样式
 function getRowClassName({row}: { row: FileItem }) {
-  return row.isdir === 1 ? 'directory-row' : ''
+  const classes: string[] = []
+  if (row.isdir === 1) classes.push('directory-row')
+  if (locatedPath.value !== null && row.path === locatedPath.value) classes.push('row-located')
+  return classes.join(' ')
 }
 
 // 获取文件显示名称（加密文件/文件夹显示原始名称）
@@ -1538,21 +1567,117 @@ async function exitSearch(options: { keepExpanded?: boolean } = {}) {
   }
 }
 
-// 多账号切换处理器：重置到根目录并重拉文件列表
+// 进入页面 / 切换账号时的起始目录：开启「保留网盘目录」时回到该账号上次浏览的目录，否则根目录
+function getInitialDir(): string {
+  if (!uiPrefsStore.rememberNetdiskPath) return '/'
+  return uiPrefsStore.getLastNetdiskDir(authStore.activeUid) ?? '/'
+}
+
+// 目录不存在时逐级向上，打开最近一个仍存在的上级目录；返回打开的目录，全部失败返回 null
+async function openNearestExistingDir(dir: string): Promise<string | null> {
+  let cur = normalizeDirPath(dir)
+  while (cur !== '/') {
+    cur = dirname(cur)
+    // 根目录失败时按常规弹出错误（此时多半是网络 / 登录问题）
+    const result = await loadFiles(cur, false, { silent: cur !== '/' })
+    if (result === 'ok') return cur
+    if (result === 'error') break
+  }
+  if (cur !== '/' && (await loadFiles('/')) === 'ok') return '/'
+  return null
+}
+
+function describeDir(dir: string): string {
+  return dir === '/' ? '根目录' : `「${dir}」`
+}
+
+// 加载起始目录；记忆的目录已被删除 / 移走时回退到最近的上级目录
+async function loadInitialDir() {
+  const dir = getInitialDir()
+  const result = await loadFiles(dir, false, { silent: dir !== '/' })
+  if (result === 'ok' || dir === '/') return
+  const opened = await openNearestExistingDir(dir)
+  if (opened !== null) {
+    ElMessage.info(
+        result === 'not_found'
+            ? `上次浏览的目录「${dir}」已不存在，已打开${describeDir(opened)}`
+            : `无法打开上次浏览的目录「${dir}」，已打开${describeDir(opened)}`,
+    )
+  }
+}
+
+// 定位到网盘中的文件：打开所在目录，翻页找到目标并高亮滚动到可见区域
+async function locateInNetdisk(dir: string, targetPath: string | null) {
+  if (isSearchMode.value) {
+    resetSearchState()
+  }
+  const result = await loadFiles(dir, false, { silent: dir !== '/' })
+  if (result !== 'ok') {
+    if (dir === '/') return
+    const opened = await openNearestExistingDir(dir)
+    if (opened !== null) {
+      ElMessage.warning(
+          result === 'not_found'
+              ? `上传目录「${dir}」在网盘中不存在（可能已被移动、重命名或删除，或任务尚未开始上传），已打开${describeDir(opened)}`
+              : `无法打开上传目录「${dir}」，已打开${describeDir(opened)}`,
+      )
+    }
+    return
+  }
+  // 加载期间用户已跳到别的目录 → 放弃定位
+  const stillHere = () => normalizeDirPath(currentDir.value) === normalizeDirPath(dir)
+  if (!targetPath || !stillHere()) return
+
+  const findTarget = () => fileList.value.find(f => f.path === targetPath)
+  for (let i = 0; i < LOCATE_MAX_PAGES && !findTarget() && hasMore.value; i++) {
+    const pageResult = await loadFiles(dir, true)
+    if (pageResult !== 'ok' || !stillHere()) return
+  }
+
+  if (!findTarget()) {
+    ElMessage.info('已打开上传目录，但未找到该文件（可能已被重命名、移动或删除）')
+    return
+  }
+  locatedPath.value = targetPath
+  await nextTick()
+  const el = fileListRef.value?.querySelector('.row-located') as HTMLElement | null
+  el?.scrollIntoView?.({ block: 'center' })
+}
+
+// 处理 /files?path=<目录>&highlight=<文件路径> 定位请求（来自上传管理），处理后清掉 query
+function consumeLocateQuery(): boolean {
+  // 离场过渡期间路由已指向其他页面，不处理
+  if (route.path !== '/files') return false
+  const dir = typeof route.query.path === 'string' ? route.query.path : ''
+  if (!dir) return false
+  const target = typeof route.query.highlight === 'string' ? route.query.highlight : null
+  void router.replace({ path: route.path })
+  void locateInNetdisk(normalizeDirPath(dir), target)
+  return true
+}
+
+// 多账号切换处理器：切到新账号上次浏览的目录（未开启记忆 / 无记录则根目录）
 // （新账号的目录树通常与旧账号不同，沿用旧 currentDir 会 404 或显示空）
 function handleActiveChanged() {
   if (isSearchMode.value) {
     resetSearchState()
   }
   selectedFiles.value = []
-  loadFiles('/')
+  void loadInitialDir()
   loadDownloadConfig()
 }
 
-// 组件挂载时加载根目录和配置
+// 已在网盘管理页时再次收到定位请求
+watch(() => route.query.path, () => {
+  consumeLocateQuery()
+})
+
+// 组件挂载时加载起始目录和配置
 onMounted(() => {
   document.addEventListener('mousedown', handleSearchOutsidePointerDown)
-  loadFiles('/')
+  if (!consumeLocateQuery()) {
+    void loadInitialDir()
+  }
   loadDownloadConfig()
   // 多账号 active 切换 → 重置到根目录并重拉（与 DownloadsView 等 5 视图一致）
   window.addEventListener('multi-account:active-changed', handleActiveChanged)
@@ -2403,6 +2528,18 @@ export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Dow
   &:hover {
     background-color: #f5f7fa;
   }
+}
+
+// 「定位到网盘」目标行：常亮浅底色 + 进入时闪烁两次
+@keyframes row-located-flash {
+  0%, 50%, 100% { background-color: #ecf5ff; }
+  25%, 75% { background-color: #c6e2ff; }
+}
+
+:deep(.el-table__row.row-located) > td.el-table__cell,
+.mobile-file-card.row-located {
+  background-color: #ecf5ff;
+  animation: row-located-flash 1.6s ease-in-out;
 }
 
 :deep(.el-table__row) {

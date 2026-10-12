@@ -209,6 +209,8 @@
         </div>
 
         <div class="header-right">
+          <!-- 多账号横向快捷切换条（系统设置 → 界面偏好 开启；移动端空间不足不显示） -->
+          <AccountQuickBar v-if="showAccountQuickBar" class="account-quick-bar-slot" />
           <!--
             多账号切换器。
             单一 dropdown 同时承担：账号切换 / 添加账号 / 账号管理 + 个人信息 / 退出百度账号 / 退出 Web 认证。
@@ -274,9 +276,11 @@ import { useWebAuthStore } from '@/stores/webAuth'
 import { useIsMobile } from '@/utils/responsive'
 import UserProfileDialog from '@/components/UserProfileDialog.vue'
 import AccountSwitcher from '@/components/AccountSwitcher.vue'
-import VipAvatar from '@/components/VipAvatar.vue'
+import AccountQuickBar from '@/components/AccountQuickBar.vue'
 import MenuTransferProgress from '@/components/MenuTransferProgress.vue'
+import VipAvatar from '@/components/VipAvatar.vue'
 import { useTaskSummaryStore, type TransferIndicator } from '@/stores/taskSummary'
+import { useUiPrefsStore } from '@/stores/uiPrefs'
 import {
   FolderOpened,
   Folder,
@@ -302,8 +306,12 @@ const webAuthStore = useWebAuthStore()
 const taskSummaryStore = useTaskSummaryStore()
 const { downloadIndicator, uploadIndicator } = storeToRefs(taskSummaryStore)
 
+const uiPrefsStore = useUiPrefsStore()
+
 // 菜单上的上传/下载进度：布局挂载期间持续轮询
 onMounted(() => taskSummaryStore.start())
+// 界面偏好（快捷切换条、网盘目录记忆等）依赖后端配置
+onMounted(() => uiPrefsStore.ensureLoaded())
 onUnmounted(() => taskSummaryStore.stop())
 
 function tabbarIndicator(path: string): TransferIndicator | null {
@@ -318,6 +326,10 @@ function formatBadge(n: number): string {
 
 // 响应式检测
 const isMobile = useIsMobile()
+
+const showAccountQuickBar = computed(
+    () => uiPrefsStore.accountQuickBar && !isMobile.value && authStore.hasMultipleAccounts,
+)
 
 // 状态
 const isCollapse = ref(false)
@@ -526,6 +538,7 @@ watch(
     display: flex;
     align-items: center;
     gap: 12px;
+    flex-shrink: 0;
 
     .mobile-menu-btn {
       flex-shrink: 0;
@@ -541,7 +554,14 @@ watch(
   .header-right {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 12px;
+    min-width: 0;
+    margin-left: 16px;
+
+    .account-quick-bar-slot {
+      flex: 0 1 auto;
+    }
 
     .account-switcher-slot {
       // AccountSwitcher 自管理触发器样式；这里仅控制布局间距

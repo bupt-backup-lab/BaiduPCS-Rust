@@ -446,7 +446,7 @@
 </template>
 
 <script setup lang="ts">
-import {ref, computed, onMounted, onUnmounted, nextTick} from 'vue'
+import {ref, computed, onMounted, onUnmounted, nextTick, h} from 'vue'
 import {ElMessage, ElMessageBox} from 'element-plus'
 import {
   getAllDownloadsMixed,
@@ -493,6 +493,7 @@ import {
   SortDown,
 } from '@element-plus/icons-vue'
 import {useRouter, useRoute} from 'vue-router'
+import {getOpenFolderCapability, openLocalFolder} from '@/api/system'
 import {useIsMobile} from '@/utils/responsive'
 import {createAdaptivePoller} from '@/utils/backendHealth'
 // 🔥 WebSocket 相关导入
@@ -1090,11 +1091,61 @@ async function handleBatchResume() {
   }
 }
 
-// 打开本地文件夹
-function openLocalFile(path: string) {
-  ElMessage.info(`文件位置: ${path}`)
-  // TODO: 实现打开本地文件夹功能
-  // 可以使用Electron或Tauri等桌面框架的API
+// 打开本地文件夹：后端运行在本机桌面系统、且浏览器在本机访问时直接唤起系统文件管理器
+// （文件会被选中）；否则（Docker / 远程访问等）弹窗展示路径供复制
+async function openLocalFile(path: string) {
+  if (!path) {
+    ElMessage.warning('未找到本地保存路径')
+    return
+  }
+  const capability = await getOpenFolderCapability()
+  if (capability.supported) {
+    try {
+      await openLocalFolder(path)
+    } catch (error: any) {
+      ElMessage.error(error?.message || '打开文件夹失败')
+    }
+    return
+  }
+  await showLocalPath(path, capability.reason)
+}
+
+async function showLocalPath(path: string, reason?: string) {
+  try {
+    await ElMessageBox.confirm(
+        h('div', [
+          h('div', {style: 'word-break: break-all'}, path),
+          reason ? h('div', {style: 'margin-top: 8px; font-size: 12px; color: #909399'}, `无法直接打开：${reason}`) : null,
+        ]),
+        '文件位置',
+        {confirmButtonText: '复制路径', cancelButtonText: '关闭', type: 'info'},
+    )
+  } catch {
+    return
+  }
+  await copyText(path)
+}
+
+async function copyText(text: string) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      // 非安全上下文（局域网 http 访问）没有 Clipboard API，退回 execCommand
+      const textarea = document.createElement('textarea')
+      textarea.value = text
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      const ok = document.execCommand('copy')
+      document.body.removeChild(textarea)
+      if (!ok) throw new Error('execCommand copy failed')
+    }
+    ElMessage.success('路径已复制')
+  } catch {
+    ElMessage.error('复制失败，请手动复制')
+  }
 }
 
 // 显示文件夹详情弹窗

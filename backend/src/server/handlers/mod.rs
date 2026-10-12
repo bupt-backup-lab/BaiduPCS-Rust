@@ -16,6 +16,7 @@ pub mod local_files;
 pub mod folder_download;
 pub mod share;
 pub mod share_sync;
+pub mod system;
 pub mod task_summary;
 pub mod transfer;
 pub mod upload;

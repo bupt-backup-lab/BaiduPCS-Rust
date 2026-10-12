@@ -69,6 +69,33 @@ pub struct AppConfig {
     /// 分享同步配置
     #[serde(default)]
     pub share_sync: ShareSyncConfig,
+    /// 界面偏好配置（仅前端使用，后端只负责持久化）
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+// ============================================================================
+// 界面偏好配置
+// ============================================================================
+
+/// 界面偏好配置：保存在服务端，换浏览器 / 设备访问时保持一致
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiConfig {
+    /// 页面切换后返回「网盘管理」时保留上次浏览的目录（按账号分别记忆）
+    #[serde(default = "default_true")]
+    pub remember_netdisk_path: bool,
+    /// 顶部栏显示多账号横向快捷切换条（点击头像一键切换账号）
+    #[serde(default)]
+    pub account_quick_bar: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            remember_netdisk_path: true,
+            account_quick_bar: false,
+        }
+    }
 }
 
 // ============================================================================
@@ -1316,6 +1343,7 @@ impl Default for AppConfig {
             multi_account_budget: MultiAccountBudgetConfig::default(),
             multi_account_vip_recommended: MultiAccountVipRecommendedConfig::default(),
             share_sync: ShareSyncConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 }
@@ -1613,6 +1641,21 @@ mod tests {
         let saved: ShareSyncConfig =
             toml::from_str(r#"exclude_preset_rules = ["*样片*", "*.nfo"]"#).unwrap();
         assert_eq!(saved.exclude_preset_rules, ["*样片*", "*.nfo"]);
+    }
+
+    /// 界面偏好：老配置文件缺失该段 / 缺字段时取默认值（记忆目录开、快捷条关）
+    #[test]
+    fn test_ui_config_defaults_and_roundtrip() {
+        assert_eq!(AppConfig::default().ui, UiConfig::default());
+        let legacy: UiConfig = toml::from_str("").unwrap();
+        assert!(legacy.remember_netdisk_path);
+        assert!(!legacy.account_quick_bar);
+
+        let saved: UiConfig =
+            toml::from_str("remember_netdisk_path = false
+account_quick_bar = true").unwrap();
+        assert!(!saved.remember_netdisk_path);
+        assert!(saved.account_quick_bar);
     }
 
     #[test]

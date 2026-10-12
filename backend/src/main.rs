@@ -489,6 +489,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/shares/:id", get(handlers::get_share_detail))
         // 🔥 系统能力检测 API
         .route("/system/watch-capability", get(handlers::autobackup::get_watch_capability))
+        .route(
+            "/system/open-folder",
+            get(handlers::system::get_open_folder_capability)
+                .post(handlers::system::open_local_folder),
+        )
         // 🔥 自动备份全局触发配置 API
         .route("/config/autobackup/trigger", get(handlers::autobackup::get_trigger_config))
         .route("/config/autobackup/trigger", put(handlers::autobackup::update_trigger_config))
@@ -573,7 +578,11 @@ async fn main() -> anyhow::Result<()> {
     info!("前端页面: http://{}/", addr);
 
     // 🔥 使用 select! 监听关闭信号，支持优雅关闭
-    let server = axum::serve(listener, app);
+    // 携带对端地址：本机打开文件夹等接口需判断请求是否来自 loopback
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    );
 
     tokio::select! {
         result = server => {

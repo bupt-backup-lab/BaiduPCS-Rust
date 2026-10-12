@@ -131,6 +131,15 @@
               </el-button>
               <el-button
                   size="small"
+                  title="在网盘管理中打开上传目录并定位该文件"
+                  :loading="locatingIds.has(item.id)"
+                  @click="handleLocate(item)"
+              >
+                <el-icon><Location /></el-icon>
+                定位
+              </el-button>
+              <el-button
+                  size="small"
                   type="danger"
                   @click="handleDelete(item)"
               >
@@ -202,6 +211,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
+import { dirname, locateNetdiskFile, type LocateFileResult } from '@/api/file'
 import {
   getAllUploads,
   pauseUpload,
@@ -232,6 +243,7 @@ import {
   RefreshRight,
   Lock,
   ArrowDown,
+  Location,
 } from '@element-plus/icons-vue'
 import {useIsMobile} from '@/utils/responsive'
 import {createAdaptivePoller} from '@/utils/backendHealth'
@@ -249,6 +261,10 @@ const isMobile = useIsMobile()
 // 状态
 const loading = ref(false)
 const uploadItems = ref<UploadTask[]>([])
+
+const router = useRouter()
+// 正在检查网盘文件的任务（「定位」按钮 loading）
+const locatingIds = ref(new Set<string>())
 
 // 多账号状态
 const authStore = useAuthStore()
@@ -389,6 +405,81 @@ async function handleResume(item: UploadTask) {
   } catch (error: any) {
     console.error('恢复任务失败:', error)
   }
+}
+
+// 定位到网盘：先按任务所属账号检查文件是否还在（不切换账号），确实能定位才跳转网盘管理并高亮；
+// 目录已不存在时留在本页提示，文件不在但目录还在时询问是否打开目录。
+// 任务属于其他账号时，跳转前需切换到该账号（网盘管理只浏览当前账号）。
+async function handleLocate(item: UploadTask) {
+  if (!item.remote_path) {
+    ElMessage.warning('该任务缺少网盘路径，无法定位')
+    return
+  }
+  if (locatingIds.value.has(item.id)) return
+
+  const ownerUid = typeof item.owner_uid === 'number' && item.owner_uid > 0 ? item.owner_uid : null
+  const needSwitch = ownerUid !== null && ownerUid !== authStore.activeUid
+  const owner = needSwitch ? authStore.accounts.find((a) => a.uid === ownerUid) : null
+  if (needSwitch && !owner) {
+    ElMessage.warning('该任务所属账号已不存在，无法定位')
+    return
+  }
+  const ownerName = owner ? owner.nickname || owner.username || `UID:${ownerUid}` : ''
+
+  const dir = dirname(item.remote_path)
+  const uploaded = item.status === 'completed' || item.status === 'rapid_upload_success'
+
+  let result: LocateFileResult
+  locatingIds.value.add(item.id)
+  try {
+    result = await locateNetdiskFile(item.remote_path, ownerUid)
+  } catch (err: any) {
+    ElMessage.error(`定位失败：${err?.message || '获取网盘文件列表失败'}`)
+    return
+  } finally {
+    locatingIds.value.delete(item.id)
+  }
+
+  if (result === 'dir_not_found') {
+    ElMessage.warning(
+        uploaded
+            ? `上传目录「${dir}」在网盘中已不存在（可能已被移动、重命名或删除），无法定位`
+            : `上传目录「${dir}」在网盘中还不存在（任务尚未上传完成），暂时无法定位`,
+    )
+    return
+  }
+
+  const switchHint = needSwitch ? `（将切换到账号「${ownerName}」）` : ''
+  try {
+    if (result === 'file_not_found') {
+      await ElMessageBox.confirm(
+          `${uploaded ? '网盘中未找到该文件（可能已被重命名、移动或删除）' : '该文件尚未上传完成'}，是否打开上传目录「${dir}」${switchHint}？`,
+          '未找到文件',
+          { confirmButtonText: '打开目录', cancelButtonText: '取消', type: 'warning' },
+      )
+    } else if (needSwitch) {
+      await ElMessageBox.confirm(
+          `该任务属于账号「${ownerName}」，需要切换到该账号才能在网盘中定位，是否切换？`,
+          '切换账号',
+          { confirmButtonText: '切换并定位', cancelButtonText: '取消', type: 'info' },
+      )
+    }
+  } catch {
+    return
+  }
+
+  if (needSwitch && ownerUid !== null) {
+    try {
+      await authStore.switchAccount(ownerUid)
+    } catch (err: any) {
+      ElMessage.error(err?.response?.data?.message || err?.message || '切换账号失败')
+      return
+    }
+  }
+  router.push({
+    path: '/files',
+    query: result === 'found' ? { path: dir, highlight: item.remote_path } : { path: dir },
+  })
 }
 
 // 删除任务
