@@ -217,6 +217,10 @@ export interface TriggerSubscriptionResponse {
   subscription_id: string
   triggered?: boolean
   run_id?: string
+  /** true：订阅正在续跑重启前未完成的那一轮，本次只是唤醒其残留下载，没有起新一轮 */
+  resumed_existing?: boolean
+  /** true：重启后的续跑还没处理到该订阅，本次没有触发（为保护残留下载），稍后再试 */
+  pending_resume?: boolean
 }
 
 /**

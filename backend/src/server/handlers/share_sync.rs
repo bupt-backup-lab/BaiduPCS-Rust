@@ -267,10 +267,20 @@ pub async fn trigger_subscription(
     tracing::info!("share-sync: POST /subscriptions/{}/trigger", id);
     let m = get_manager(&state).await?;
     require_subscription(&m, &id)?;
-    let run_id = m.trigger_one(&id).await.map_err(map_share_err)?;
-    Ok(Json(ApiResponse::success(
-        serde_json::json!({"subscription_id": id, "triggered": true, "run_id": run_id}),
-    )))
+    use crate::share_sync::manager::TriggerOutcome;
+    let outcome = m.trigger_one(&id).await.map_err(map_share_err)?;
+    let (triggered, run_id, resumed_existing, pending_resume) = match outcome {
+        TriggerOutcome::Started { run_id } => (true, Some(run_id), false, false),
+        TriggerOutcome::WokeResuming { run_id } => (true, Some(run_id), true, false),
+        TriggerOutcome::PendingResume => (false, None, false, true),
+    };
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "subscription_id": id,
+        "triggered": triggered,
+        "run_id": run_id,
+        "resumed_existing": resumed_existing,
+        "pending_resume": pending_resume,
+    }))))
 }
 
 #[derive(Debug, Deserialize)]
