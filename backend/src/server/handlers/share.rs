@@ -234,19 +234,19 @@ pub async fn create_share(
     };
 
     // 调用分享API
-    match client
-        .share_set(&request.paths, request.period, &pwd)
-        .await
-    {
+    match client.share_set(&request.paths, request.period, &pwd).await {
         Ok(response) => {
             if response.is_success() {
                 // 使用我们传入的 pwd，而不是 response.pwd（百度API可能不返回）
                 let result = ShareResult {
                     link: response.link,
-                    pwd: pwd.clone(),  // 使用我们生成/传入的提取码
+                    pwd: pwd.clone(), // 使用我们生成/传入的提取码
                     shareid: response.shareid,
                 };
-                info!("分享创建成功: shareid={}, pwd={}", result.shareid, result.pwd);
+                info!(
+                    "分享创建成功: shareid={}, pwd={}",
+                    result.shareid, result.pwd
+                );
                 Ok(Json(ApiResponse::success(result)))
             } else {
                 // 检查是否需要预热重试 (errno=-6)
@@ -259,15 +259,12 @@ pub async fn create_share(
                             info!("预热成功，重试创建分享...");
                             // 重新获取活跃账号客户端（cookies 已刷新）
                             if let Some(c) = state.active_client().await {
-                                match c
-                                    .share_set(&request.paths, request.period, &pwd)
-                                    .await
-                                {
+                                match c.share_set(&request.paths, request.period, &pwd).await {
                                     Ok(retry_response) => {
                                         if retry_response.is_success() {
                                             let result = ShareResult {
                                                 link: retry_response.link,
-                                                pwd: pwd.clone(),  // 使用我们生成/传入的提取码
+                                                pwd: pwd.clone(), // 使用我们生成/传入的提取码
                                                 shareid: retry_response.shareid,
                                             };
                                             info!(
@@ -277,14 +274,16 @@ pub async fn create_share(
                                             return Ok(Json(ApiResponse::success(result)));
                                         } else {
                                             error!(
-                                                "预热重试后仍失败: errno={}, errmsg={}",
-                                                retry_response.errno, retry_response.errmsg
+                                                "预热重试后仍失败: errno={}, errmsg={}, show_msg={}",
+                                                retry_response.errno,
+                                                retry_response.errmsg,
+                                                retry_response.show_msg
                                             );
                                             return Ok(Json(ApiResponse::error(
                                                 retry_response.errno,
                                                 format!(
                                                     "创建分享失败（已重试）: {}",
-                                                    retry_response.errmsg
+                                                    retry_response.error_reason()
                                                 ),
                                             )));
                                         }
@@ -309,12 +308,12 @@ pub async fn create_share(
                 }
 
                 error!(
-                    "创建分享失败: errno={}, errmsg={}",
-                    response.errno, response.errmsg
+                    "创建分享失败: errno={}, errmsg={}, show_msg={}",
+                    response.errno, response.errmsg, response.show_msg
                 );
                 Ok(Json(ApiResponse::error(
                     response.errno,
-                    format!("创建分享失败: {}", response.errmsg),
+                    format!("创建分享失败: {}", response.error_reason()),
                 )))
             }
         }
