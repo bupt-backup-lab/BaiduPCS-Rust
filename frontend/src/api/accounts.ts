@@ -11,9 +11,7 @@
  */
 
 import axios from 'axios'
-
-// 与 webAuth store 一致
-const WEB_AUTH_ACCESS_TOKEN_KEY = 'web_auth_access_token'
+import { addWebAuthInterceptor } from './client'
 
 const apiClient = axios.create({
   baseURL: '/api/v1',
@@ -21,14 +19,8 @@ const apiClient = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
-apiClient.interceptors.request.use(
-    (config) => {
-      const token = localStorage.getItem(WEB_AUTH_ACCESS_TOKEN_KEY)
-      if (token) config.headers.Authorization = `Bearer ${token}`
-      return config
-    },
-    (error) => Promise.reject(error),
-)
+// Web 认证拦截器（附带令牌；419 时先刷新令牌再重试），必须在下面的响应拦截器之前注册
+addWebAuthInterceptor(apiClient)
 
 apiClient.interceptors.response.use(
     (response) => response.data,

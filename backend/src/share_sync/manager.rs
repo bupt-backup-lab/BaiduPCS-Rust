@@ -53,6 +53,12 @@ pub struct ShareSyncManager {
     schedulers: DashMap<String, SubscriptionScheduler>,
     /// 正在执行中的订阅 ID 集合（并发触发去重；presence = 有 run 在跑）
     running: DashMap<String, ()>,
+    /// 正处于重启续跑接管的订阅 ID → 被接管的 run_id。有记录时 `running` 必有；
+    /// `trigger_one` 据此把手动触发改为唤醒残留下载，而不是报「正在同步中」。
+    resuming: DashMap<String, String>,
+    /// 启动期待续跑、但 `resume_interrupted_runs` 还没处理到的订阅。在此集合里的订阅
+    /// 不许起新一轮：新一轮开头的 `sweep_residual_subtasks` 会删掉待接管的残留下载。
+    pending_resume: DashMap<String, ()>,
     /// 持久化层
     persistence: Arc<ShareSyncPersistence>,
     /// 配置文件路径（JSON）
@@ -84,6 +90,9 @@ impl std::fmt::Debug for ShareSyncManager {
 /// 真正有活儿的是再往前一条」这种情况。
 const STALE_INTERRUPTED_PER_SUB: usize = 3;
 
+/// 订阅还在等启动续跑接管时，拒绝起新一轮的提示。
+const PENDING_RESUME_MSG: &str = "正在恢复重启前未完成的同步，请稍候再试";
+
 /// 启动续跑的待处理 run，按「本次收编」和「历史遗留」分开。
 ///
 /// 两者的处理权限不同，混在一起会出事：
@@ -97,6 +106,28 @@ const STALE_INTERRUPTED_PER_SUB: usize = 3;
 struct ResumeTarget {
     fresh: Vec<String>,
     stale: Vec<String>,
+    /// 名下 run 中最早的 `started_at`，决定多个订阅之间的接管顺序（越早越先）。
+    earliest_started_at: Option<i64>,
+}
+
+impl ResumeTarget {
+    fn note_started_at(&mut self, started_at: i64) {
+        self.earliest_started_at = Some(
+            self.earliest_started_at
+                .map_or(started_at, |cur| cur.min(started_at)),
+        );
+    }
+}
+
+/// 手动「立即同步」的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerOutcome {
+    /// 起了新一轮
+    Started { run_id: String },
+    /// 没起新一轮，唤醒了正在续跑接管的那一轮的残留下载
+    WokeResuming { run_id: String },
+    /// 启动续跑还没处理到该订阅，本次不起新一轮（否则会清掉待接管的残留下载）
+    PendingResume,
 }
 
 /// Manager 构造参数
@@ -141,11 +172,11 @@ impl ShareSyncManager {
                         interrupted.len()
                     );
                     for rec in &interrupted {
-                        interrupted_runs
+                        let entry = interrupted_runs
                             .entry(rec.subscription_id.clone())
-                            .or_default()
-                            .fresh
-                            .push(rec.run_id.clone());
+                            .or_default();
+                        entry.fresh.push(rec.run_id.clone());
+                        entry.note_started_at(rec.started_at);
                     }
                 }
                 Ok(_) => {}
@@ -174,6 +205,7 @@ impl ShareSyncManager {
                         if entry.fresh.contains(&rec.run_id) {
                             continue;
                         }
+                        entry.note_started_at(rec.started_at);
                         entry.stale.push(rec.run_id);
                         n += 1;
                     }
@@ -209,6 +241,8 @@ impl ShareSyncManager {
             subscriptions: DashMap::new(),
             schedulers: DashMap::new(),
             running: DashMap::new(),
+            resuming: DashMap::new(),
+            pending_resume: DashMap::new(),
             persistence,
             config_path: cfg.config_path,
             publisher: cfg
@@ -259,6 +293,22 @@ impl ShareSyncManager {
             }
         }
 
+        // 对被中断的、且仍启用的订阅自动续跑(像自动备份重启续跑)。
+        // `pending_resume` 必须在启动调度器之前挂上，否则调度器可能抢先起新一轮。
+        let mut resume_targets: Vec<(String, ResumeTarget)> = Vec::new();
+        if resume_on_startup {
+            resume_targets = interrupted_runs
+                .into_iter()
+                .filter(|(id, _)| subs.iter().any(|s| &s.id == id && s.enabled))
+                .collect();
+            // 按 run 开始时间接管：等待队列是 FIFO，先开始的那一轮重启前才是占着槽位在下的。
+            resume_targets
+                .sort_by_key(|(id, t)| (t.earliest_started_at.unwrap_or(i64::MAX), id.clone()));
+            for (id, _) in &resume_targets {
+                manager.pending_resume.insert(id.clone(), ());
+            }
+        }
+
         for sub in subs {
             manager.subscriptions.insert(sub.id.clone(), sub.clone());
             if sub.enabled && sub.poll_config.enabled {
@@ -272,27 +322,12 @@ impl ShareSyncManager {
             manager.subscriptions.len()
         );
 
-        // 对被中断的、且仍启用的订阅自动重跑一次(像自动备份重启续跑)。只保留 enabled
-        // 的——已禁用的订阅不该被启动悄悄唤醒。后台 spawn,best-effort:账号尚未就绪时
-        // execute_one 在创建 run 前就报错(不留失败记录),退避重试若干次;始终不行则交给
-        // 调度器在下个轮询周期补上,不阻塞启动。
-        if resume_on_startup && !interrupted_runs.is_empty() {
-            let resume_targets: Vec<(String, ResumeTarget)> = interrupted_runs
-                .into_iter()
-                .filter(|(id, _)| {
-                    manager
-                        .subscriptions
-                        .get(id)
-                        .map(|s| s.enabled)
-                        .unwrap_or(false)
-                })
-                .collect();
-            if !resume_targets.is_empty() {
-                let mgr = Arc::clone(&manager);
-                tokio::spawn(async move {
-                    mgr.resume_interrupted_runs(resume_targets).await;
-                });
-            }
+        // 后台 spawn,best-effort:账号迟迟未就绪的交给调度器在下个轮询周期补上,不阻塞启动。
+        if !resume_targets.is_empty() {
+            let mgr = Arc::clone(&manager);
+            tokio::spawn(async move {
+                mgr.resume_interrupted_runs(resume_targets).await;
+            });
         }
 
         Ok(manager)
@@ -391,12 +426,16 @@ impl ShareSyncManager {
     /// 于是 run 永远停在 Interrupted、基线永远不推进、下一轮全部重做。
     ///
     /// 期间占住该订阅的 in-flight 标记，避免调度器起一轮竞争的 run。
+    ///
+    /// `initial_wake_done`：第一次唤醒残留下载之后（或提前放弃接管时）通知调用方，
+    /// 让多个订阅的接管按顺序把残留下载排进等待队列（见 `resume_interrupted_runs`）。
     async fn resume_run_in_place(
         self: Arc<Self>,
         sub_id: String,
         run_id: String,
         owner_uid: u64,
         transfer_task_ids: Vec<String>,
+        mut initial_wake_done: Option<tokio::sync::oneshot::Sender<()>>,
     ) {
         const POLL_INTERVAL_SECS: u64 = 2;
         // 唤醒残留下载的节流，与 wait_transfer_task 里的 paused-resume 同口径
@@ -419,6 +458,21 @@ impl ShareSyncManager {
             running: &self.running,
             id: sub_id.clone(),
         };
+        // 声明在 RunGuard 之后 → 先于它 drop：任何时刻 resuming 有记录则 running 必有。
+        self.resuming.insert(sub_id.clone(), run_id.clone());
+        struct ResumingGuard<'g> {
+            resuming: &'g DashMap<String, String>,
+            id: String,
+        }
+        impl Drop for ResumingGuard<'_> {
+            fn drop(&mut self) {
+                self.resuming.remove(&self.id);
+            }
+        }
+        let _resuming_guard = ResumingGuard {
+            resuming: &self.resuming,
+            id: sub_id.clone(),
+        };
 
         let Some(tm) = self.resolver.transfer_manager(owner_uid).await else {
             warn!("续跑接管: 订阅 {} 的转存管理器不可用，放弃接管", sub_id);
@@ -438,7 +492,10 @@ impl ShareSyncManager {
         // run —— 不收编、不续跑，这批活儿直接变孤儿（实测踩到过：接管跑到一半被杀，
         // 重启后一条续跑日志都没有，前端全是暂停）。
         if let Err(e) = self.persistence.mark_run_running(&run_id) {
-            warn!("续跑接管: 标记 run 为运行中失败 run_id={}, error={}", run_id, e);
+            warn!(
+                "续跑接管: 标记 run 为运行中失败 run_id={}, error={}",
+                run_id, e
+            );
         }
         let _ = self
             .persistence
@@ -487,34 +544,34 @@ impl ShareSyncManager {
                 }
             }
             // 唤醒残留下载：重启后它们都是暂停态，没人拉起就永远不动。
-            // 与 wait_transfer_task 同款闸门：槽位满时不硬唤醒（否则只是把自己挪到队尾）。
+            //
+            // 第一次唤醒不看槽位：恢复出来的暂停任务不在等待队列里，没槽位时 resume
+            // 会把它们排进队列（Pending）。若也要等空槽，别的订阅占满槽位后空出来的槽
+            // 总被队列立刻补上，这里永远等不到。之后的唤醒维持 wait_transfer_task 同款
+            // 闸门：槽位满时不硬唤醒（那时还暂停的多半是被抢占的）。
             let now = tokio::time::Instant::now();
             let resume_due = last_resume_at
                 .map(|last| now.duration_since(last) >= Duration::from_secs(RESUME_INTERVAL_SECS))
                 .unwrap_or(true);
             if resume_due {
+                let first_wake = last_resume_at.is_none();
                 last_resume_at = Some(now);
-                let has_slot = match tm.download_manager_handle().await {
+                let has_slot = first_wake
+                    || match tm.download_manager_handle().await {
                     Some(dm) => dm.task_slot_pool().available_slots().await > 0,
                     None => true,
                 };
                 if has_slot {
-                    let paused: Vec<ShareSyncSubtask> =
-                        collect_share_sync_subtasks(&tm, &sub_id, owner_uid)
-                            .await
-                            .into_iter()
-                            .filter(|s| s.status == "paused")
-                            .collect();
-                    if !paused.is_empty() {
-                        let n =
-                            restart_stalled_share_sync_downloads(&tm, &paused, Duration::ZERO).await;
-                        if n > 0 {
-                            info!(
-                                "share_sync 续跑接管: 订阅 {} 唤醒了 {} 个残留下载",
-                                sub_id, n
-                            );
-                        }
+                    let n = wake_paused_share_sync_downloads(&tm, &sub_id, owner_uid).await;
+                    if n > 0 {
+                        info!(
+                            "share_sync 续跑接管: 订阅 {} 唤醒了 {} 个残留下载",
+                            sub_id, n
+                        );
                     }
+                }
+                if let Some(tx) = initial_wake_done.take() {
+                    let _ = tx.send(());
                 }
             }
 
@@ -653,12 +710,45 @@ impl ShareSyncManager {
         const RESUME_INITIAL_DELAY_SECS: u64 = 5;
         const READY_MAX_ATTEMPTS: u32 = 12;
         const READY_RETRY_DELAY_SECS: u64 = 10;
+        // 启动期推倒重跑的并发上限（限速器只管 RPS，不管同时有几轮在抓取）。
+        const STARTUP_RERUN_CONCURRENCY: usize = 2;
+
+        /// 处理完（或本任务异常退出时）把订阅从 `pending_resume` 摘掉，放开新一轮。
+        struct PendingResumeGuard<'g> {
+            pending: &'g DashMap<String, ()>,
+            ids: Vec<String>,
+        }
+        impl Drop for PendingResumeGuard<'_> {
+            fn drop(&mut self) {
+                for id in &self.ids {
+                    self.pending.remove(id);
+                }
+            }
+        }
+        // 兜底：还没轮到的订阅也要在本函数退出（含 panic）时放开，不能永久锁死。
+        let mut unprocessed = PendingResumeGuard {
+            pending: &self.pending_resume,
+            ids: targets.iter().map(|(id, _)| id.clone()).collect(),
+        };
+        let rerun_limit = Arc::new(tokio::sync::Semaphore::new(STARTUP_RERUN_CONCURRENCY));
+        let mut not_ready_owners: BTreeSet<u64> = BTreeSet::new();
+
         tokio::time::sleep(std::time::Duration::from_secs(RESUME_INITIAL_DELAY_SECS)).await;
         for (id, target) in targets {
+            unprocessed.ids.retain(|x| x != &id);
+            // 本轮结束即放开；接管分支里放开时 `running` + `resuming` 已占住，无缝交接。
+            let current = PendingResumeGuard {
+                pending: &self.pending_resume,
+                ids: vec![id.clone()],
+            };
             let owner_uid = match self.get_subscription(&id) {
                 Some(s) => s.owner_uid,
                 None => continue, // 订阅启动后被删,跳过
             };
+            // 同账号已确认未就绪：不再逐个订阅干等（期间门禁一直挂着），交给轮询调度兜底。
+            if not_ready_owners.contains(&owner_uid) {
+                continue;
+            }
             // 等账号(网盘客户端 + 转存管理器)就绪——execute_one 在抓取前需要它们。
             let mut ready = false;
             for _ in 0..READY_MAX_ATTEMPTS {
@@ -675,6 +765,7 @@ impl ShareSyncManager {
                     "share_sync 启动续跑: 订阅 {} 所属账号(uid={})迟迟未就绪,交给轮询调度兜底",
                     id, owner_uid
                 );
+                not_ready_owners.insert(owner_uid);
                 continue;
             }
             // 🔥 重跑之前先清掉上一轮的残留（否则每中断一次就叠一批孤儿）。
@@ -685,11 +776,11 @@ impl ShareSyncManager {
             //   - 被中断那几轮的候选快照（它们永远不会被提升了）
             //
             // 为什么此刻清是安全的：本轮还没建任何新任务，而上一轮的残留在重启后
-            // 都是暂停态、没有任何 run 在驱动它们。唯一的例外是调度器抢先触发了新
-            // 一轮 —— 那种情况下 `running` 里已有在飞的 run，跳过清理与重跑，交给它。
+            // 都是暂停态、没有任何 run 在驱动它们（`pending_resume` 挡住了别的入口，
+            // 下面的检查只是防御）。
             if self.running.contains_key(&id) {
                 debug!(
-                    "share_sync 启动续跑: 订阅 {} 已有 run 在执行（调度器抢先），跳过清理与重跑",
+                    "share_sync 启动续跑: 订阅 {} 已有 run 在执行，跳过清理与重跑",
                     id
                 );
                 continue;
@@ -706,9 +797,13 @@ impl ShareSyncManager {
                     let mgr = Arc::clone(&self);
                     let sub = id.clone();
                     let rid = run_id.clone();
+                    let (wake_tx, wake_rx) = tokio::sync::oneshot::channel();
                     tokio::spawn(async move {
-                        mgr.resume_run_in_place(sub, rid, owner_uid, task_ids).await;
+                        mgr.resume_run_in_place(sub, rid, owner_uid, task_ids, Some(wake_tx))
+                            .await;
                     });
+                    // 串行唤醒，排队顺序才与重启前一致；接管提前放弃时 sender 被 drop，不会卡住。
+                    let _ = wake_rx.await;
                     taken_over = true;
                     break;
                 }
@@ -732,7 +827,10 @@ impl ShareSyncManager {
 
             for run_id in &target.fresh {
                 if let Err(e) = self.persistence.delete_snapshot_for_run(run_id) {
-                    warn!("清理中断 run 的候选快照失败: run_id={}, error={}", run_id, e);
+                    warn!(
+                        "清理中断 run 的候选快照失败: run_id={}, error={}",
+                        run_id, e
+                    );
                 }
             }
             let cfg_id = share_sync_backup_config_id(&id);
@@ -746,15 +844,44 @@ impl ShareSyncManager {
                 }
             }
 
-            match self.execute_one(&id).await {
-                Ok(_) => info!("share_sync 启动续跑: 订阅 {} 已重新同步", id),
-                // 调度器抢先触发了 —— 正常,无需重复。
-                Err(ShareSyncError::AlreadyRunning(_)) => {}
-                Err(e) => warn!(
-                    "share_sync 启动续跑: 订阅 {} 触发失败({}),交给轮询调度兜底",
-                    id, e
-                ),
-            }
+            // 不能在循环里 await execute_one：它要等全部下载跑完（可达数小时），会卡住
+            // 后面订阅的接管。残留已删完，门禁到此才可以放开；排队期间若已有人起过新一轮，
+            // 轮到时就不再重复跑。
+            drop(current);
+            let queued_at = chrono::Utc::now().timestamp();
+            let mgr = Arc::clone(&self);
+            let limit = Arc::clone(&rerun_limit);
+            tokio::spawn(async move {
+                let Ok(_permit) = limit.acquire_owned().await else {
+                    return;
+                };
+                match mgr.get_subscription(&id) {
+                    Some(s) if s.enabled => {}
+                    _ => return, // 排队期间被删除 / 停用
+                }
+                let superseded = mgr
+                    .persistence
+                    .list_runs(&id, 1, 1)
+                    .ok()
+                    .and_then(|runs| runs.into_iter().next())
+                    .is_some_and(|r| r.started_at >= queued_at);
+                if superseded {
+                    debug!(
+                        "share_sync 启动续跑: 订阅 {} 排队期间已有新一轮，跳过重跑",
+                        id
+                    );
+                    return;
+                }
+                match mgr.execute_one(&id).await {
+                    Ok(_) => info!("share_sync 启动续跑: 订阅 {} 已重新同步", id),
+                    // 调度器 / 手动触发抢先了 —— 正常,无需重复。
+                    Err(ShareSyncError::AlreadyRunning(_)) => {}
+                    Err(e) => warn!(
+                        "share_sync 启动续跑: 订阅 {} 触发失败({}),交给轮询调度兜底",
+                        id, e
+                    ),
+                }
+            });
         }
     }
 
@@ -1097,7 +1224,7 @@ impl ShareSyncManager {
     ///
     /// 手动触发不再只唤醒 scheduler：scheduler 的错误只会落日志，HTTP 调用方会误以为
     /// 已成功开始。这里同步完成可判定的前置校验，然后直接排一个后台 run。
-    pub async fn trigger_one(self: &Arc<Self>, id: &str) -> Result<String, ShareSyncError> {
+    pub async fn trigger_one(self: &Arc<Self>, id: &str) -> Result<TriggerOutcome, ShareSyncError> {
         let sub = self
             .get_subscription(id)
             .ok_or_else(|| ShareSyncError::SubscriptionNotFound(id.into()))?;
@@ -1120,11 +1247,17 @@ impl ShareSyncManager {
                     .unwrap_or_else(|| "分享链接已失效，已暂停轮询；请更新链接后恢复".into()),
             ));
         }
-        if self.running.contains_key(id) {
+        // 续跑接管中的订阅不算「正在同步中」，下面会改为唤醒它的残留下载。
+        if self.running.contains_key(id) && !self.resuming.contains_key(id) {
             return Err(ShareSyncError::AlreadyRunning(format!(
-                "订阅 {} 正在同步中，请等待当前运行结束",
-                id
+                "订阅「{}」正在同步中，请等待当前运行结束",
+                sub.name
             )));
+        }
+        // 还没轮到接管：不新建 run，否则会清掉待接管的残留下载。放在登录校验之前，
+        // 账号未就绪时也按「正在恢复」处理。交接瞬间 pending 与 resuming 可能并存，交给唤醒分支。
+        if self.pending_resume.contains_key(id) && !self.resuming.contains_key(id) {
+            return Ok(TriggerOutcome::PendingResume);
         }
         if self.resolver.netdisk_client(sub.owner_uid).await.is_none() {
             return Err(ShareSyncError::ConfigError(format!(
@@ -1132,16 +1265,22 @@ impl ShareSyncManager {
                 sub.owner_uid
             )));
         }
-        if self
-            .resolver
-            .transfer_manager(sub.owner_uid)
-            .await
-            .is_none()
-        {
+        let Some(tm) = self.resolver.transfer_manager(sub.owner_uid).await else {
             return Err(ShareSyncError::ConfigError(format!(
                 "订阅所属账号(uid={})的转存管理器未就绪",
                 sub.owner_uid
             )));
+        };
+
+        // 续跑接管中：不起新一轮，把残留下载全部唤醒（不看槽位，没槽位的进等待队列）。
+        // 接管若恰好在上面几步之间结束，这里取不到记录，照常起新一轮。
+        if let Some(run_id) = self.resuming.get(id).map(|r| r.value().clone()) {
+            let n = wake_paused_share_sync_downloads(&tm, id, sub.owner_uid).await;
+            info!(
+                "share-sync: 订阅 {} 正在续跑接管 run={}，手动触发改为唤醒残留下载 {} 个",
+                id, run_id, n
+            );
+            return Ok(TriggerOutcome::WokeResuming { run_id });
         }
 
         // 同步落库 + 广播：让 HTTP 调用方在拿到响应瞬间就能拿到一个"已经写进 runs 表、
@@ -1177,7 +1316,7 @@ impl ShareSyncManager {
             "share-sync: 已启动订阅 {} 的手动同步 run, run_id={}",
             id, run_id
         );
-        Ok(run_id)
+        Ok(TriggerOutcome::Started { run_id })
     }
 
     /// 执行一次（由 scheduler 调用或 trigger_one 同步入口）。
@@ -1196,6 +1335,20 @@ impl ShareSyncManager {
         id: &str,
         given_run_id: Option<String>,
     ) -> Result<ApplyOutcome, ShareSyncError> {
+        // 启动续跑还没处理到这个订阅：不能起新一轮（见 `pending_resume`）。
+        if self.pending_resume.contains_key(id) {
+            debug!("share-sync: 订阅 {} 正在等待启动续跑，跳过本次触发", id);
+            if let Some(rid) = given_run_id.as_deref() {
+                let owner_uid = self.get_subscription(id).map(|s| s.owner_uid).unwrap_or(0);
+                self.fail_run(
+                    rid,
+                    id,
+                    owner_uid,
+                    "正在恢复重启前未完成的同步，已取消本次触发",
+                );
+            }
+            return Err(ShareSyncError::AlreadyRunning(PENDING_RESUME_MSG.into()));
+        }
         // 全局并发去重：同一订阅同一时刻只允许一个 run 在执行。
         // scheduler 的 running 标志只防它自己循环内重入；这里覆盖所有入口
         // （手动 trigger / 被禁用订阅的 spawn 路径 / 多个调度器并存），
@@ -1319,11 +1472,10 @@ impl ShareSyncManager {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3);
-        let snapshot_base_delay_ms: u64 =
-            std::env::var("BAIDUPCS_SHARE_SYNC_SNAPSHOT_BACKOFF_MS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1000);
+        let snapshot_base_delay_ms: u64 = std::env::var("BAIDUPCS_SHARE_SYNC_SNAPSHOT_BACKOFF_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
         let mut snapshot_attempt: u32 = 0;
 
         // 跨「整轮重试」复用的目录缓存：只在**本次 run** 内有效。
@@ -1428,7 +1580,9 @@ impl ShareSyncManager {
         };
         // 成功抓取到分享内容 → 链接可用，归零失效计数（如曾标记失效也清除）。
         self.clear_link_failure(id);
-        let _ = self.persistence.update_run_phase(&run_id, RUN_PHASE_DIFFING);
+        let _ = self
+            .persistence
+            .update_run_phase(&run_id, RUN_PHASE_DIFFING);
 
         // 2) 绑定 subscription_id 后，先读"上次成功应用的快照"再计算 diff。
         //    当前快照必须等执行成功后才能推进基线；否则下载/转存失败会把
@@ -2313,6 +2467,25 @@ fn restartable_share_sync_download(
         .then(|| RestartableShareSyncDownload::Task(subtask.task_id.clone()))
 }
 
+/// 唤醒该订阅名下所有暂停态的下载，返回唤醒个数。不看槽位：没槽位时 resume 会把任务
+/// 排进等待队列（Pending）。
+async fn wake_paused_share_sync_downloads(
+    transfer: &TransferManager,
+    subscription_id: &str,
+    owner_uid: u64,
+) -> usize {
+    let paused: Vec<ShareSyncSubtask> =
+        collect_share_sync_subtasks(transfer, subscription_id, owner_uid)
+            .await
+            .into_iter()
+            .filter(|s| s.status == "paused")
+            .collect();
+    if paused.is_empty() {
+        return 0;
+    }
+    restart_stalled_share_sync_downloads(transfer, &paused, Duration::ZERO).await
+}
+
 async fn restart_stalled_share_sync_downloads(
     transfer: &TransferManager,
     subtasks: &[ShareSyncSubtask],
@@ -2406,7 +2579,10 @@ async fn restart_stalled_share_sync_downloads(
                     match download_manager.resume_task(&task_id).await {
                         Ok(()) => {
                             restarted += 1;
-                            warn!("share-sync: paused download task resumed: task_id={}", task_id);
+                            warn!(
+                                "share-sync: paused download task resumed: task_id={}",
+                                task_id
+                            );
                         }
                         Err(e) => warn!(
                             "share-sync: resume paused download task failed: task_id={}, error={}",
@@ -2742,7 +2918,12 @@ impl ProductionHooks {
         // backup_config 的查询里（见 `DownloadTask::new_with_group`），要单独取
         if let Some(fdm) = tm.folder_download_manager_handle().await {
             for f in fdm.get_folders_by_backup_config(&cfg).await {
-                statuses.extend(dm.get_tasks_by_group(&f.id).await.iter().map(|t| t.status.clone()));
+                statuses.extend(
+                    dm.get_tasks_by_group(&f.id)
+                        .await
+                        .iter()
+                        .map(|t| t.status.clone()),
+                );
             }
         }
 
@@ -3461,7 +3642,10 @@ fn prefetched_share_for_captured(
 fn share_url_for_captured(captured: &CapturedShare) -> String {
     let base = match captured.kind {
         crate::transfer::ShareKind::Apaas => {
-            format!("https://pan.baidu.com/apaas/share?surl={}", captured.short_key)
+            format!(
+                "https://pan.baidu.com/apaas/share?surl={}",
+                captured.short_key
+            )
         }
         crate::transfer::ShareKind::Personal => {
             format!("https://pan.baidu.com/s/{}", captured.short_key)
@@ -3810,8 +3994,18 @@ mod tests {
             assert!(is_terminal_subtask_status(s), "{} 应是终态", s);
         }
         // 非终态：续跑要继续等
-        for s in ["pending", "downloading", "paused", "scanning", "transferring"] {
-            assert!(!is_terminal_subtask_status(s), "{} 不是终态，续跑要继续等", s);
+        for s in [
+            "pending",
+            "downloading",
+            "paused",
+            "scanning",
+            "transferring",
+        ] {
+            assert!(
+                !is_terminal_subtask_status(s),
+                "{} 不是终态，续跑要继续等",
+                s
+            );
         }
     }
 
@@ -3976,7 +4170,11 @@ mod tests {
             "有子任务在跑 → 照实上报"
         );
 
-        for terminal in [FolderStatus::Failed, FolderStatus::Cancelled, FolderStatus::Completed] {
+        for terminal in [
+            FolderStatus::Failed,
+            FolderStatus::Cancelled,
+            FolderStatus::Completed,
+        ] {
             let s = folder_subtask_status(terminal.clone(), true);
             assert!(
                 is_terminal_subtask_status(&s),
@@ -4605,5 +4803,125 @@ mod tests {
         let r = m.trigger_one(&s.id).await;
         m.running.remove(&s.id);
         assert!(matches!(r, Err(ShareSyncError::AlreadyRunning(_))));
+    }
+
+    /// 已登录（离线构造的客户端 / 转存管理器，不发网络请求）的解析器
+    fn logged_in_resolver() -> StaticAccountResolver {
+        let user = crate::auth::UserAuth::new(1, "user_1".to_string(), "bduss_1".to_string());
+        let client = NetdiskClient::new(user).expect("create test client");
+        let tm = TransferManager::new(
+            Arc::new(std::sync::RwLock::new(client.clone())),
+            crate::config::TransferConfig::default(),
+            Arc::new(tokio::sync::RwLock::new(crate::config::AppConfig::default())),
+        );
+        StaticAccountResolver::new(Some(Arc::new(client)), Some(Arc::new(tm)))
+    }
+
+    #[tokio::test]
+    async fn test_trigger_one_during_resume_takeover_wakes_instead_of_failing() {
+        let dir = tempdir().unwrap();
+        let m = ShareSyncManager::new(ManagerConfig {
+            config_path: dir.path().join("subs.json"),
+            db_path: dir.path().join("s.db"),
+            resolver: Arc::new(logged_in_resolver()),
+            publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
+        })
+            .await
+            .unwrap();
+        let mut sub = sub("a");
+        sub.owner_uid = 1;
+        let s = m.create_subscription(sub).unwrap();
+
+        // 模拟 resume_run_in_place 正在接管 run-old
+        m.running.insert(s.id.clone(), ());
+        m.resuming.insert(s.id.clone(), "run-old".to_string());
+        let r = m.trigger_one(&s.id).await;
+        m.resuming.remove(&s.id);
+        m.running.remove(&s.id);
+
+        assert_eq!(
+            r.unwrap(),
+            TriggerOutcome::WokeResuming {
+                run_id: "run-old".to_string(),
+            }
+        );
+        // 没有起新一轮，也没有写新的 run 记录
+        assert!(m.persistence.list_runs(&s.id, 1, 10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_trigger_one_with_real_run_in_flight_still_fails_fast() {
+        let dir = tempdir().unwrap();
+        let m = ShareSyncManager::new(ManagerConfig {
+            config_path: dir.path().join("subs.json"),
+            db_path: dir.path().join("s.db"),
+            resolver: Arc::new(logged_in_resolver()),
+            publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
+        })
+            .await
+            .unwrap();
+        let mut sub = sub("a");
+        sub.owner_uid = 1;
+        let s = m.create_subscription(sub).unwrap();
+
+        m.running.insert(s.id.clone(), ());
+        let r = m.trigger_one(&s.id).await;
+        m.running.remove(&s.id);
+        assert!(matches!(r, Err(ShareSyncError::AlreadyRunning(_))));
+    }
+
+    #[tokio::test]
+    async fn test_interrupted_run_gates_new_runs_from_startup() {
+        let dir = tempdir().unwrap();
+        let cfg = |resolver: StaticAccountResolver| ManagerConfig {
+            config_path: dir.path().join("subs.json"),
+            db_path: dir.path().join("s.db"),
+            resolver: Arc::new(resolver),
+            publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
+        };
+        // 上一次进程：订阅 a 有一轮在跑时进程退出
+        let mut a = sub("a");
+        a.owner_uid = 1;
+        let a = {
+            // 未登录：创建后的首同步在建 run 之前就失败，库里只留下面这一轮
+            let m = ShareSyncManager::new(cfg(StaticAccountResolver::none()))
+                .await
+                .unwrap();
+            let a = m.create_subscription(a).unwrap();
+            m.persistence.start_run("run-a", &a.id, 100).unwrap();
+            m.shutdown().await;
+            a
+        };
+
+        // 本次启动：new() 返回时门禁就该挂上，早于调度器与接管
+        let m = ShareSyncManager::new(cfg(logged_in_resolver()))
+            .await
+            .unwrap();
+        assert!(m.pending_resume.contains_key(&a.id));
+
+        // 手动触发：返回「正在恢复」，不新建 run
+        assert_eq!(
+            m.trigger_one(&a.id).await.unwrap(),
+            TriggerOutcome::PendingResume
+        );
+        // 调度器路径：同样被拦下（不会走到清残留）
+        assert!(matches!(
+            m.execute_one(&a.id).await,
+            Err(ShareSyncError::AlreadyRunning(_))
+        ));
+        let runs = m.persistence.list_runs(&a.id, 1, 10).unwrap();
+        assert_eq!(runs.len(), 1, "只有被收编的那一轮，没有新建 run");
+        assert_eq!(runs[0].id, "run-a");
+        m.shutdown().await;
+    }
+
+    #[test]
+    fn test_resume_target_tracks_earliest_started_at() {
+        let mut t = ResumeTarget::default();
+        assert_eq!(t.earliest_started_at, None);
+        t.note_started_at(200);
+        t.note_started_at(100);
+        t.note_started_at(300);
+        assert_eq!(t.earliest_started_at, Some(100));
     }
 }

@@ -1257,8 +1257,16 @@ async function triggerNow(s?: ShareSubscription) {
   if (!target) return
   triggeringId.value = target.id
   try {
-    await triggerSubscription(target.id)
-    ElMessage.success('已触发同步，结果将稍后出现在运行历史')
+    const res = await triggerSubscription(target.id)
+    if (res?.pending_resume) {
+      ElMessage.warning('正在恢复重启前未完成的同步，请稍候再试')
+      return
+    }
+    ElMessage.success(
+        res?.resumed_existing
+            ? '该订阅正在继续重启前未完成的同步，已唤醒其下载任务（无空闲槽位时将排队等待）'
+            : '已触发同步，结果将稍后出现在运行历史'
+    )
     setTimeout(() => {
       if (selected.value?.id === target.id) loadRuns(target.id)
       loadSubtasksFor(target.id)

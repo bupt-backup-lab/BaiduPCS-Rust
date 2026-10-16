@@ -16,7 +16,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 // ============================================================================
 // DTO
@@ -96,31 +96,24 @@ pub async fn switch_account(
 
     // 🔥 切换前确保 NetdiskClient 在 client_pool 中已存在；
     // preheat 启动期可能失败，此处兜底懒加载，避免切换后 active_client() 返回 None 导致 401 误报。
-    state
-        .ensure_client_for_uid(target_uid)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "切换前懒加载 client 失败: uid={}, err={:?}",
-                target_uid.raw(),
-                e
-            );
-            ApiError::Internal(anyhow::anyhow!(
-                "切换账号失败: 无法构造目标账号客户端 ({})",
-                e
-            ))
-        })?;
+    state.ensure_client_for_uid(target_uid).await.map_err(|e| {
+        tracing::error!(
+            "切换前懒加载 client 失败: uid={}, err={:?}",
+            target_uid.raw(),
+            e
+        );
+        ApiError::Internal(anyhow::anyhow!(
+            "切换账号失败: 无法构造目标账号客户端 ({})",
+            e
+        ))
+    })?;
 
     // 🔥 切换前会话体检：非活跃账号从不预热（见 preheat_inactive_clients），
     // 陈旧会话直接上岗会在删除/列表等 Web 接口撞百度 errno=-6（issue #130）。
     // 预热数据缺失/过期的账号在这里先 verify_bduss + 重新预热；
     // 会话确定失效则拒绝切换并给出明确提示，引导用户重新登录该账号。
     if let Err(e) = state.ensure_session_for_switch(target_uid).await {
-        tracing::warn!(
-            "切换前会话体检未通过: uid={}, err={}",
-            target_uid.raw(),
-            e
-        );
+        tracing::warn!("切换前会话体检未通过: uid={}, err={}", target_uid.raw(), e);
         return Err(ApiError::BadRequest(format!("切换账号失败: {}", e)));
     }
 
@@ -262,6 +255,8 @@ pub async fn delete_account(
         .await
         .map_err(ApiError::Internal)?;
 
+    clear_default_download_account(&state, target_uid).await;
+
     // 读取最新 active_uid（force_delete_account 已通过 helper 完成切换）
     let new_active = {
         let mgr = state.account_manager.lock().await;
@@ -281,6 +276,19 @@ pub async fn delete_account(
         deleted_uid: target_uid.raw(),
         new_active_uid: new_active,
     }))
+}
+
+/// 被删账号是「用其他账号下载」的默认账号时清掉该配置；账号已删除，失败只记日志
+async fn clear_default_download_account(state: &AppState, uid: Uid) {
+    let mut config = state.config.read().await.clone();
+    if config.download.default_download_account_uid != Some(uid.raw()) {
+        return;
+    }
+    config.download.default_download_account_uid = None;
+    match config.save_to_file("config/app.toml").await {
+        Ok(_) => *state.config.write().await = config,
+        Err(e) => warn!("清除默认下载账号失败: uid={}, error={:#}", uid.raw(), e),
+    }
 }
 
 /// 🔥 扫描指定 uid 是否有运行中（非终态）任务
@@ -346,10 +354,7 @@ async fn scan_running_tasks_for_uid(state: &AppState, target_uid: Uid) -> Option
     let mut fd_running = 0usize;
     for f in state.folder_download_manager.get_all_folders().await {
         if f.owner_uid == target_uid
-            && matches!(
-                f.status,
-                FolderStatus::Scanning | FolderStatus::Downloading
-            )
+            && matches!(f.status, FolderStatus::Scanning | FolderStatus::Downloading)
         {
             fd_running += 1;
         }

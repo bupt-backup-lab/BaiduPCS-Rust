@@ -499,7 +499,6 @@ impl UploadErrorKind {
     }
 }
 
-
 // =====================================================
 // 分享相关类型定义
 // =====================================================
@@ -507,26 +506,42 @@ impl UploadErrorKind {
 /// 创建分享响应
 ///
 /// 百度网盘 API: POST /share/pset
+///
+/// 失败时百度可能把字段返回成 `null`，除 `errno` 外都按缺省值处理，
+/// 否则整段解析失败，失败原因就丢了
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShareSetResponse {
     /// 错误码（0表示成功）
     pub errno: i32,
 
     /// 分享链接
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub link: String,
 
     /// 提取码
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub pwd: String,
 
     /// 分享ID
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub shareid: u64,
 
     /// 错误信息
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub errmsg: String,
+
+    /// 百度给用户看的提示文案（如账号受限时的原因），失败时常只有这个字段有内容
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub show_msg: String,
+}
+
+/// 把 JSON `null` 当作缺省值
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl ShareSetResponse {
@@ -534,6 +549,44 @@ impl ShareSetResponse {
     pub fn is_success(&self) -> bool {
         self.errno == 0 && !self.link.is_empty() && self.shareid > 0
     }
+
+    /// 失败原因（不含「创建分享失败」前缀），末尾附 errno 便于排查
+    ///
+    /// 优先用百度的 `show_msg`（与网页端提示一致），其次已知错误码，再次 `errmsg`
+    pub fn error_reason(&self) -> String {
+        let show_msg = self.show_msg.trim();
+        let errmsg = self.errmsg.trim();
+        let reason = if !show_msg.is_empty() {
+            show_msg.to_string()
+        } else if let Some(known) = share_set_errno_reason(self.errno) {
+            known.to_string()
+        } else if !errmsg.is_empty() {
+            errmsg.to_string()
+        } else {
+            "百度未返回具体原因。如果在百度网盘网页端分享同样失败，\
+             可能是账号未绑定手机号等限制，请按网页端提示处理"
+                .to_string()
+        };
+        format!("{}（errno={}）", reason, self.errno)
+    }
+}
+
+/// 百度网盘网页端对创建分享常见错误码的提示
+fn share_set_errno_reason(errno: i32) -> Option<&'static str> {
+    Some(match errno {
+        -6 => "登录已过期或凭证不完整，请重新登录",
+        -70 => "文件中包含病毒或疑似病毒，无法分享",
+        108 => "文件名包含敏感词，无法分享",
+        110 => "今日分享次数已达上限",
+        115 => "所选文件中有被百度禁止分享的文件",
+        9100 | 9200 => "账号存在违规行为，已被冻结",
+        9300 => "账号存在违规行为，分享功能暂被冻结",
+        9400 => "账号异常，需在百度网盘网页端或 App 完成验证（如绑定手机号）后才能分享",
+        9500 => "账号存在安全风险，已进入保护模式，请修改密码后再试",
+        // 开放平台分享接口文档中的错误码，网页接口未必返回，保留以防万一
+        13100 => "账号未绑定手机号，请先在百度网盘网页端或 App 绑定手机号后再分享",
+        _ => return None,
+    })
 }
 
 /// 取消分享响应
@@ -713,7 +766,6 @@ impl ShareSURLInfoResponse {
     }
 }
 
-
 // =====================================================
 // 删除文件相关类型定义
 // =====================================================
@@ -807,7 +859,12 @@ impl DeleteFilesResponse {
     }
 
     /// 创建带 errno 的失败响应
-    pub fn failure_with_errno(error: String, errno: i32, authwidget: Option<AuthWidget>, verify_scene: Option<i32>) -> Self {
+    pub fn failure_with_errno(
+        error: String,
+        errno: i32,
+        authwidget: Option<AuthWidget>,
+        verify_scene: Option<i32>,
+    ) -> Self {
         Self {
             success: false,
             error: Some(error),
@@ -1215,9 +1272,8 @@ mod tests {
         assert_eq!(timed.expire_at(1791792267), 1792397064);
 
         // 缺少 lastExpireTime 时按剩余秒数推算
-        let timed_no_last = record(
-            r#"{"shareId":2,"status":0,"public":0,"expiredType":0,"expiredTime":604797}"#,
-        );
+        let timed_no_last =
+            record(r#"{"shareId":2,"status":0,"public":0,"expiredType":0,"expiredTime":604797}"#);
         assert_eq!(timed_no_last.expire_at(1000), 1000 + 604797);
 
         let permanent = record(
@@ -1232,5 +1288,47 @@ mod tests {
         assert!(expired.is_expired());
         assert!(!expired.is_permanent());
         assert_eq!(expired.expire_at(1000), 0);
+    }
+
+    #[test]
+    fn share_set_error_reason_prefers_show_msg() {
+        let resp = |errno: i32, errmsg: &str, show_msg: &str| ShareSetResponse {
+            errno,
+            link: String::new(),
+            pwd: String::new(),
+            shareid: 0,
+            errmsg: errmsg.to_string(),
+            show_msg: show_msg.to_string(),
+        };
+        // show_msg 优先于已知错误码和 errmsg
+        assert_eq!(
+            resp(115, "fail", "请先绑定手机号").error_reason(),
+            "请先绑定手机号（errno=115）"
+        );
+        assert!(resp(115, "", "").error_reason().contains("禁止分享"));
+        assert!(resp(110, "", " ").error_reason().contains("上限"));
+        assert_eq!(resp(42, "boom", "").error_reason(), "boom（errno=42）");
+        let unknown = resp(42, "", "").error_reason();
+        assert!(unknown.contains("手机号") && unknown.ends_with("（errno=42）"));
+    }
+
+    #[test]
+    fn share_set_response_parses_show_msg() {
+        let resp: ShareSetResponse =
+            serde_json::from_str(r#"{"errno":42,"show_msg":"原因"}"#).unwrap();
+        assert_eq!(resp.show_msg, "原因");
+        assert!(resp.errmsg.is_empty());
+
+        // 失败时字段为 null 也要能解析出原因
+        let resp: ShareSetResponse = serde_json::from_str(
+            r#"{"errno":42,"link":null,"pwd":null,"shareid":null,"errmsg":null,"show_msg":"原因"}"#,
+        )
+            .unwrap();
+        assert_eq!(resp.error_reason(), "原因（errno=42）");
+        assert_eq!(resp.shareid, 0);
+
+        let resp: ShareSetResponse =
+            serde_json::from_str(r#"{"errno":13100,"show_msg":null}"#).unwrap();
+        assert!(resp.error_reason().contains("绑定手机号"));
     }
 }

@@ -233,11 +233,25 @@ export const useWebAuthStore = defineStore('webAuth', () => {
 
   // ============ 公共方法 ============
 
-  /** 初始化：加载令牌并设置回调 */
-  async function initialize() {
-    // 设置 API 客户端回调
-    webAuthApi.setTokenRefreshCallback((tokens: RefreshResponse) => {
-      setTokens(tokens)
+  /** 初始化 Promise（main.ts / 路由守卫 / Web 登录页共享，只执行一次） */
+  let initPromise: Promise<void> | null = null
+
+  /** 初始化：加载令牌并设置回调（幂等，重复调用返回同一个 Promise） */
+  function initialize(): Promise<void> {
+    if (!initPromise) {
+      initPromise = doInitialize().catch((err) => {
+        // 失败后允许下次调用重试，而不是永久缓存失败结果
+        initPromise = null
+        throw err
+      })
+    }
+    return initPromise
+  }
+
+  async function doInitialize() {
+    // 设置 API 客户端回调：webAuthApi 遇到 419 时统一走 store 的单飞刷新
+    webAuthApi.setRefreshHandler(async () => {
+      return (await refreshTokens()) ? accessToken.value : null
     })
 
     webAuthApi.setAuthFailureCallback(() => {
@@ -264,6 +278,10 @@ export const useWebAuthStore = defineStore('webAuth', () => {
       // 如果认证未启用，直接标记为已认证
       if (!status.enabled) {
         isAuthenticated.value = true
+      } else if (isAuthenticated.value && !status.authenticated) {
+        // 本地令牌未过期但服务端不认可（如服务重启、密码变更后令牌失效），
+        // 尝试刷新；刷新失败会清除令牌并置为未认证
+        await refreshTokens()
       }
 
       return status
@@ -369,8 +387,26 @@ export const useWebAuthStore = defineStore('webAuth', () => {
     }
   }
 
-  /** 刷新令牌 */
-  async function refreshTokens(): Promise<boolean> {
+  /** 进行中的刷新（单飞） */
+  let refreshPromise: Promise<boolean> | null = null
+
+  /**
+   * 刷新令牌（单飞：并发调用共享同一次请求）
+   *
+   * 后端 refresh token 是轮换的（用一次即作废），同一颗 refresh token 并发刷新时
+   * 后到的那次必然失败并 clearTokens()，会把先到那次换回的新令牌一起清掉。
+   * 所有刷新入口（定时器、初始化、checkAuthStatus、各 API 客户端的 419 拦截）都必须走这里。
+   */
+  function refreshTokens(): Promise<boolean> {
+    if (!refreshPromise) {
+      refreshPromise = doRefreshTokens().finally(() => {
+        refreshPromise = null
+      })
+    }
+    return refreshPromise
+  }
+
+  async function doRefreshTokens(): Promise<boolean> {
     if (!refreshToken.value) {
       clearTokens()
       return false
