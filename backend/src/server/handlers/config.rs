@@ -128,9 +128,7 @@ pub async fn reset_to_recommended(
                 )
             };
         manager.update_max_threads(eff_dl_threads);
-        manager
-            .update_max_concurrent_tasks(eff_dl_concurrent)
-            .await;
+        manager.update_max_concurrent_tasks(eff_dl_concurrent).await;
         manager
             .update_download_dir(config.download.download_dir.clone())
             .await;
@@ -196,26 +194,38 @@ pub async fn update_config(
 
     // 基本验证
     if new_config.download.max_global_threads == 0 {
-        return Err(ApiError::BadRequest("download.max_global_threads 必须大于 0".to_string()));
+        return Err(ApiError::BadRequest(
+            "download.max_global_threads 必须大于 0".to_string(),
+        ));
     }
 
     if new_config.download.chunk_size_mb == 0 {
-        return Err(ApiError::BadRequest("download.chunk_size_mb 必须大于 0".to_string()));
+        return Err(ApiError::BadRequest(
+            "download.chunk_size_mb 必须大于 0".to_string(),
+        ));
     }
 
     if new_config.download.max_concurrent_tasks == 0 {
-        return Err(ApiError::BadRequest("download.max_concurrent_tasks 必须大于 0".to_string()));
+        return Err(ApiError::BadRequest(
+            "download.max_concurrent_tasks 必须大于 0".to_string(),
+        ));
     }
 
     // 补齐 upload 侧校验（避免 upload 接受 0 会导致上传分片调度阀门关闭，所有上传永久阻塞）。
     if new_config.upload.max_global_threads == 0 {
-        return Err(ApiError::BadRequest("upload.max_global_threads 必须大于 0".to_string()));
+        return Err(ApiError::BadRequest(
+            "upload.max_global_threads 必须大于 0".to_string(),
+        ));
     }
     if new_config.upload.chunk_size_mb == 0 {
-        return Err(ApiError::BadRequest("upload.chunk_size_mb 必须大于 0".to_string()));
+        return Err(ApiError::BadRequest(
+            "upload.chunk_size_mb 必须大于 0".to_string(),
+        ));
     }
     if new_config.upload.max_concurrent_tasks == 0 {
-        return Err(ApiError::BadRequest("upload.max_concurrent_tasks 必须大于 0".to_string()));
+        return Err(ApiError::BadRequest(
+            "upload.max_concurrent_tasks 必须大于 0".to_string(),
+        ));
     }
 
     // 获取当前用户的 VIP 类型并验证
@@ -360,7 +370,10 @@ pub async fn update_config(
         } else {
             None
         };
-        app_state.fallback_mgr.on_user_config_change(new_proxy_config.as_ref()).await;
+        app_state
+            .fallback_mgr
+            .on_user_config_change(new_proxy_config.as_ref())
+            .await;
 
         // 准备代理参数（QRCodeAuth、NetdiskClient、DownloadEngine 共用）
         let proxy_for_client = if proxy.proxy_type != crate::common::ProxyType::None {
@@ -387,7 +400,11 @@ pub async fn update_config(
         // 按 active_uid → AccountManager 取，不再读 current_user
         let user_auth = app_state.active_user_auth().await;
         if let Some(user) = user_auth {
-            match crate::netdisk::NetdiskClient::new_with_proxy(user, proxy_for_client, fallback_for_client.clone()) {
+            match crate::netdisk::NetdiskClient::new_with_proxy(
+                user,
+                proxy_for_client,
+                fallback_for_client.clone(),
+            ) {
                 Ok(new_client) => {
                     *app_state.netdisk_client.write().await = Some(new_client);
                     info!("✓ NetdiskClient 已热更新");
@@ -419,10 +436,17 @@ pub async fn update_config(
                 am.get_user(uid).cloned()
             };
             let Some(user) = user_for_uid else {
-                warn!("UploadManager uid={} 代理热更新跳过：无法取到 UserAuth", uid.raw());
+                warn!(
+                    "UploadManager uid={} 代理热更新跳过：无法取到 UserAuth",
+                    uid.raw()
+                );
                 continue;
             };
-            match crate::netdisk::NetdiskClient::new_with_proxy(user, proxy_for_client, fallback_for_client.clone()) {
+            match crate::netdisk::NetdiskClient::new_with_proxy(
+                user,
+                proxy_for_client,
+                fallback_for_client.clone(),
+            ) {
                 Ok(new_client) => {
                     um.update_netdisk_client(new_client);
                     info!("✓ UploadManager uid={} NetdiskClient 已热更新", uid.raw());
@@ -444,10 +468,17 @@ pub async fn update_config(
                 am.get_user(uid).cloned()
             };
             let Some(user) = user_for_uid else {
-                warn!("TransferManager uid={} 代理热更新跳过：无法取到 UserAuth", uid.raw());
+                warn!(
+                    "TransferManager uid={} 代理热更新跳过：无法取到 UserAuth",
+                    uid.raw()
+                );
                 continue;
             };
-            match crate::netdisk::NetdiskClient::new_with_proxy(user, proxy_for_client, fallback_for_client.clone()) {
+            match crate::netdisk::NetdiskClient::new_with_proxy(
+                user,
+                proxy_for_client,
+                fallback_for_client.clone(),
+            ) {
                 Ok(new_client) => {
                     tm.update_netdisk_client(new_client);
                     info!("✓ TransferManager uid={} NetdiskClient 已热更新", uid.raw());
@@ -506,12 +537,20 @@ pub async fn update_config(
                 continue;
             };
 
-            match crate::netdisk::NetdiskClient::new_with_proxy(user, proxy_for_client, fallback_for_client.clone()) {
+            match crate::netdisk::NetdiskClient::new_with_proxy(
+                user,
+                proxy_for_client,
+                fallback_for_client.clone(),
+            ) {
                 Ok(new_client) => {
                     monitor.update_client(new_client);
                     info!("✓ CloudDlMonitor uid={} NetdiskClient 已热更新", uid.raw());
                 }
-                Err(e) => warn!("CloudDlMonitor uid={} NetdiskClient 热更新失败: {}", uid.raw(), e),
+                Err(e) => warn!(
+                    "CloudDlMonitor uid={} NetdiskClient 热更新失败: {}",
+                    uid.raw(),
+                    e
+                ),
             }
         }
 
@@ -520,9 +559,14 @@ pub async fn update_config(
         {
             let user_auth = app_state.active_user_auth().await;
             if let Some(user) = user_auth {
-                match crate::netdisk::NetdiskClient::new_with_proxy(user, proxy_for_client, fallback_for_client.clone()) {
+                match crate::netdisk::NetdiskClient::new_with_proxy(
+                    user,
+                    proxy_for_client,
+                    fallback_for_client.clone(),
+                ) {
                     Ok(new_client) => {
-                        app_state.folder_download_manager
+                        app_state
+                            .folder_download_manager
                             .set_netdisk_client(Arc::new(new_client))
                             .await;
                         info!("✓ FolderDownloadManager NetdiskClient 已热更新");
@@ -546,8 +590,11 @@ pub async fn update_config(
                         app_state.fallback_mgr.execute_fallback().await;
                     } else {
                         // 不允许回退：仅标记状态为异常，不切直连
-                        app_state.fallback_mgr
-                            .set_runtime_status(crate::common::ProxyRuntimeStatus::FallenBackToDirect)
+                        app_state
+                            .fallback_mgr
+                            .set_runtime_status(
+                                crate::common::ProxyRuntimeStatus::FallenBackToDirect,
+                            )
                             .await;
                     }
                 }
@@ -680,6 +727,44 @@ pub async fn set_default_download_dir(
         .await;
 
     Ok(Json(ApiResponse::success("默认下载目录已设置".to_string())))
+}
+
+/// 设置默认下载账号请求
+#[derive(Debug, Deserialize)]
+pub struct SetDefaultDownloadAccountRequest {
+    /// 账号 UID；`null` 表示取消默认
+    pub uid: Option<u64>,
+}
+
+/// POST /api/v1/config/default-download-account
+/// 设置「用其他账号下载」默认选中的账号
+pub async fn set_default_download_account(
+    State(app_state): State<crate::server::AppState>,
+    Json(req): Json<SetDefaultDownloadAccountRequest>,
+) -> ApiResult<Json<ApiResponse<String>>> {
+    info!("设置默认下载账号: {:?}", req.uid);
+
+    if let Some(uid) = req.uid {
+        let mgr = app_state.account_manager.lock().await;
+        if mgr.get_user(crate::auth::Uid::new(uid)).is_none() {
+            return Err(ApiError::BadRequest(format!(
+                "账号不存在或已移除: UID {}",
+                uid
+            )));
+        }
+    }
+
+    let mut config = app_state.config.read().await.clone();
+    config.download.default_download_account_uid = req.uid;
+
+    config
+        .save_to_file("config/app.toml")
+        .await
+        .map_err(ApiError::Internal)?;
+
+    *app_state.config.write().await = config;
+
+    Ok(Json(ApiResponse::success("默认下载账号已设置".to_string())))
 }
 
 // ============================================

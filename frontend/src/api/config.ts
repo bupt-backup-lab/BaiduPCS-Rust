@@ -53,6 +53,7 @@ export interface DownloadConfig {
   download_dir: string
   default_directory?: string       // 用户设置的默认下载目录
   recent_directory?: string        // 最近使用的下载目录
+  default_download_account_uid?: number | null  // 「用其他账号下载」默认账号
   ask_each_time: boolean           // 每次下载时是否询问保存位置
   max_global_threads: number       // 全局最大线程数
   chunk_size_mb: number            // 分片大小
@@ -359,6 +360,13 @@ export interface SetDefaultDirRequest {
  */
 export async function setDefaultDownloadDir(req: SetDefaultDirRequest): Promise<string> {
   return apiClient.post('/config/default-download-dir', req)
+}
+
+/**
+ * 设置「用其他账号下载」默认账号，传 null 取消默认
+ */
+export async function setDefaultDownloadAccount(uid: number | null): Promise<string> {
+  return apiClient.post('/config/default-download-account', { uid })
 }
 
 // ============================================

@@ -1,6 +1,6 @@
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
-import ElementPlus, { ElNotification } from 'element-plus'
+import ElementPlus, { ElMessage, ElNotification } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CrossAccountTransferDialog from '../CrossAccountTransferDialog.vue'
 import type { CrossAccountJob } from '@/api/crossAccount'
@@ -32,6 +32,7 @@ vi.mock('@/api/config', () => ({
   getConfig: vi.fn().mockResolvedValue({
     download: { download_dir: 'downloads', default_directory: 'D:/dl', ask_each_time: false },
   }),
+  setDefaultDownloadAccount: vi.fn().mockResolvedValue('ok'),
   setDefaultDownloadDir: vi.fn(),
   updateRecentDirDebounced: vi.fn(),
 }))
@@ -329,5 +330,193 @@ describe('CrossAccountTransferDialog', () => {
 
     success.mockRestore()
     error.mockRestore()
+  })
+
+  describe('下载账号预选', () => {
+    const baseAccounts = auth.accounts
+
+    afterEach(() => {
+      auth.accounts = baseAccounts
+    })
+
+    function useAccounts(vipTypes: Record<number, number>) {
+      auth.accounts = [1, 2, 3, 4].map((uid) => ({
+        uid,
+        username: `u${uid}`,
+        nickname: null,
+        avatar_url: null,
+        is_active: uid === 1,
+        vip_type: vipTypes[uid] ?? 0,
+      })) as typeof baseAccounts
+    }
+
+    async function openDownload(defaultUid?: number | null) {
+      const { getConfig } = await import('@/api/config')
+      vi.mocked(getConfig).mockResolvedValueOnce({
+        download: { download_dir: 'D:/dl', ask_each_time: false, default_download_account_uid: defaultUid },
+      } as never)
+      const wrapper = mountDialog()
+      await wrapper.setProps({ initialMode: 'download' })
+      await wrapper.setProps({ modelValue: true })
+      await flush()
+      return wrapper
+    }
+
+    it('没有默认账号时预选第一个非源账号的 SVIP', async () => {
+      useAccounts({ 1: 2, 3: 2, 4: 2 })
+      const wrapper = await openDownload()
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.targetUid).toBe(3)
+      wrapper.unmount()
+    })
+
+    it('设好的默认下载账号优先于 SVIP；默认账号是源账号时退回 SVIP', async () => {
+      useAccounts({ 3: 2 })
+      let wrapper = await openDownload(4)
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.targetUid).toBe(4)
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.isDefaultAccount).toBe(true)
+      wrapper.unmount()
+
+      wrapper = await openDownload(1)
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.targetUid).toBe(3)
+      wrapper.unmount()
+    })
+
+    it('多个候选且无 SVIP、无默认时不预选；复制模式不按 SVIP 预选', async () => {
+      useAccounts({})
+      const wrapper = await openDownload()
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.targetUid).toBeNull()
+      wrapper.unmount()
+
+      useAccounts({ 3: 2 })
+      const copy = mountDialog()
+      await copy.setProps({ modelValue: true })
+      await flush()
+      // @ts-expect-error setup 内部状态
+      expect(copy.vm.targetUid).toBeNull()
+      copy.unmount()
+    })
+
+    it('勾选 / 取消「设为默认下载账号」会保存到后端', async () => {
+      useAccounts({})
+      const { setDefaultDownloadAccount } = await import('@/api/config')
+      vi.mocked(setDefaultDownloadAccount).mockClear()
+      const wrapper = await openDownload()
+      // @ts-expect-error setup 内部状态
+      wrapper.vm.targetUid = 2
+      await flush()
+
+      const checkbox = () => document.body.querySelector<HTMLInputElement>('.cross-account__default input')!
+      expect(checkbox().disabled).toBe(false)
+      checkbox().click()
+      await flush()
+      expect(setDefaultDownloadAccount).toHaveBeenLastCalledWith(2)
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.isDefaultAccount).toBe(true)
+
+      checkbox().click()
+      await flush()
+      expect(setDefaultDownloadAccount).toHaveBeenLastCalledWith(null)
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.isDefaultAccount).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('下载配置首次加载失败：再次以下载模式打开会重试并套用默认账号', async () => {
+      useAccounts({})
+      const { getConfig } = await import('@/api/config')
+      vi.mocked(getConfig).mockRejectedValueOnce(new Error('boom'))
+      const wrapper = mountDialog()
+      await wrapper.setProps({ initialMode: 'download' })
+      await wrapper.setProps({ modelValue: true })
+      await flush()
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.targetUid).toBeNull()
+
+      vi.mocked(getConfig).mockResolvedValueOnce({
+        download: { download_dir: 'D:/dl', ask_each_time: false, default_download_account_uid: 3 },
+      } as never)
+      await wrapper.setProps({ modelValue: false })
+      await wrapper.setProps({ modelValue: true })
+      await flush()
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.targetUid).toBe(3)
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.localDownloadPath).toBe('D:/dl')
+      wrapper.unmount()
+    })
+
+    it('下载配置加载失败时勾选默认账号仍保持勾选', async () => {
+      useAccounts({})
+      const { getConfig, setDefaultDownloadAccount } = await import('@/api/config')
+      vi.mocked(getConfig).mockRejectedValueOnce(new Error('boom'))
+      const wrapper = mountDialog()
+      await wrapper.setProps({ initialMode: 'download' })
+      await wrapper.setProps({ modelValue: true })
+      await flush()
+      // @ts-expect-error setup 内部状态
+      wrapper.vm.targetUid = 2
+      await flush()
+
+      document.body.querySelector<HTMLInputElement>('.cross-account__default input')!.click()
+      await flush()
+      expect(setDefaultDownloadAccount).toHaveBeenLastCalledWith(2)
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.isDefaultAccount).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('配置请求途中保存了默认账号，后到的旧配置不会覆盖', async () => {
+      useAccounts({})
+      const { getConfig, setDefaultDownloadAccount } = await import('@/api/config')
+      let resolveConfig!: (v: unknown) => void
+      vi.mocked(getConfig).mockReturnValueOnce(new Promise((r) => (resolveConfig = r)) as never)
+      const wrapper = mountDialog()
+      await wrapper.setProps({ initialMode: 'download' })
+      await wrapper.setProps({ modelValue: true })
+      await flush()
+      // @ts-expect-error setup 内部状态
+      wrapper.vm.targetUid = 2
+      await flush()
+
+      document.body.querySelector<HTMLInputElement>('.cross-account__default input')!.click()
+      await flush()
+      expect(setDefaultDownloadAccount).toHaveBeenLastCalledWith(2)
+
+      resolveConfig({ download: { download_dir: 'D:/dl', ask_each_time: false, default_download_account_uid: 4 } })
+      await flush()
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.isDefaultAccount).toBe(true)
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.targetUid).toBe(2)
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.localDownloadPath).toBe('D:/dl')
+      wrapper.unmount()
+    })
+
+    it('保存默认账号失败时不重复弹错，勾选态不变', async () => {
+      useAccounts({})
+      const { setDefaultDownloadAccount } = await import('@/api/config')
+      vi.mocked(setDefaultDownloadAccount).mockRejectedValueOnce(new Error('账号不存在'))
+      const msg = vi.spyOn(ElMessage, 'error')
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const wrapper = await openDownload()
+      // @ts-expect-error setup 内部状态
+      wrapper.vm.targetUid = 2
+      await flush()
+
+      document.body.querySelector<HTMLInputElement>('.cross-account__default input')!.click()
+      await flush()
+      expect(msg).not.toHaveBeenCalled()
+      // @ts-expect-error setup 内部状态
+      expect(wrapper.vm.isDefaultAccount).toBe(false)
+      msg.mockRestore()
+      consoleError.mockRestore()
+      wrapper.unmount()
+    })
   })
 })

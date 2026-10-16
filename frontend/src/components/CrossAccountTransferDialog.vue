@@ -27,7 +27,17 @@
               :exclude-uids="sourceUid != null ? [sourceUid] : []"
               :placeholder="mode === 'download' ? '选择用来下载的账号' : '选择目标账号'"
               class="cross-account__account"
+              @change="targetPicked = true"
           />
+          <el-checkbox
+              v-if="mode === 'download'"
+              :model-value="isDefaultAccount"
+              :disabled="targetUid == null || savingDefaultAccount"
+              class="cross-account__default"
+              @change="toggleDefaultAccount"
+          >
+            设为默认下载账号
+          </el-checkbox>
         </el-form-item>
         <el-form-item v-if="mode === 'download'" label="下载到">
           <div class="cross-account__dir">
@@ -176,6 +186,7 @@ import { useIsMobile } from '@/utils/responsive'
 import type { FileItem } from '@/api/file'
 import {
   getConfig,
+  setDefaultDownloadAccount,
   setDefaultDownloadDir,
   updateRecentDirDebounced,
   type DownloadConfig,
@@ -205,6 +216,8 @@ const emit = defineEmits<{
 }>()
 
 const POLL_INTERVAL_MS = 1000
+/** 百度 vip_type：2 = 超级会员 */
+const SVIP_TYPE = 2
 /** 连续轮询失败多少次后放弃 */
 const MAX_POLL_FAILURES = 10
 
@@ -226,6 +239,13 @@ const visible = computed({
 const sourceUid = computed(() => authStore.activeUid)
 const mode = ref<CrossAccountMode>('copy')
 const targetUid = ref<number | null>(null)
+/** 用户本次是否手动选过账号；选过就不再自动预选 */
+const targetPicked = ref(false)
+const savingDefaultAccount = ref(false)
+/** 已设的默认下载账号；单独存放，下载配置加载失败时勾选也能生效 */
+const defaultAccountUid = ref<number | null>(null)
+/** 默认账号保存成功的次数；配置请求途中保存过，就不用请求结果覆盖刚存的值 */
+let defaultAccountSaves = 0
 const targetDir = ref('/')
 const showFolderPicker = ref(false)
 const submitting = ref(false)
@@ -316,38 +336,98 @@ const successTitle = computed(() => {
   return `已${MODE_LABELS[j.mode]}到 ${accountName(j.target_uid)} 的 ${j.target_dir}${suffix}`
 })
 
+/**
+ * 自动预选的账号：下载模式依次取设好的默认下载账号、第一个 SVIP 账号；
+ * 都没有时（以及复制/移动模式）只剩一个候选账号才直接选它
+ */
+function autoTargetUid(m: CrossAccountMode): number | null {
+  const candidates = authStore.accounts.filter((a) => a.uid !== sourceUid.value)
+  if (m === 'download') {
+    const preferred =
+        candidates.find((a) => a.uid === defaultAccountUid.value) ??
+        candidates.find((a) => a.vip_type === SVIP_TYPE)
+    if (preferred) return preferred.uid
+  }
+  return candidates.length === 1 ? candidates[0].uid : null
+}
+
+function applyAutoTarget() {
+  if (!targetPicked.value) targetUid.value = autoTargetUid(mode.value)
+}
+
+const isDefaultAccount = computed(
+    () => targetUid.value != null && targetUid.value === defaultAccountUid.value,
+)
+
+async function toggleDefaultAccount(checked: string | number | boolean) {
+  if (targetUid.value == null) return
+  const uid = checked ? targetUid.value : null
+  savingDefaultAccount.value = true
+  try {
+    await setDefaultDownloadAccount(uid)
+    defaultAccountUid.value = uid
+    defaultAccountSaves += 1
+  } catch (e) {
+    // 错误提示已由 config API 的拦截器弹出
+    console.error('设置默认下载账号失败:', e)
+  } finally {
+    savingDefaultAccount.value = false
+  }
+}
+
 function resetForm() {
   mode.value = props.initialMode
-  const candidates = authStore.accounts.filter((a) => a.uid !== sourceUid.value)
-  targetUid.value = candidates.length === 1 ? candidates[0].uid : null
+  targetPicked.value = false
+  targetUid.value = autoTargetUid(mode.value)
   targetDir.value = '/'
   job.value = null
   pollError.value = ''
 }
 
-/** 首次进入下载模式时读取下载配置，本地目录默认用默认下载目录 */
+let configLoading: Promise<void> | null = null
+
+async function loadDownloadConfig() {
+  const savesBefore = defaultAccountSaves
+  try {
+    downloadConfig.value = (await getConfig()).download
+    if (defaultAccountSaves === savesBefore) {
+      defaultAccountUid.value = downloadConfig.value.default_download_account_uid ?? null
+    }
+  } catch (e) {
+    console.error('加载下载配置失败:', e)
+  } finally {
+    configLoading = null
+  }
+}
+
+/**
+ * 进入下载模式时读取下载配置（上次加载失败则重试，并发调用共用一次请求），
+ * 本地目录默认用默认下载目录，账号按默认下载账号预选
+ */
 async function ensureDownloadConfig() {
   if (!downloadConfig.value) {
-    try {
-      downloadConfig.value = (await getConfig()).download
-    } catch (e) {
-      console.error('加载下载配置失败:', e)
-    }
+    if (!configLoading) configLoading = loadDownloadConfig()
+    await configLoading
   }
   if (!localDownloadPath.value) {
     localDownloadPath.value = defaultDownloadDir.value
   }
+  if (mode.value === 'download') applyAutoTarget()
 }
 
 // 打开时：仍在跟踪的任务继续展示，否则按本次选中的文件重置表单
 watch(
     () => props.modelValue,
     (open) => {
-      if (open && !tracking.value) resetForm()
+      if (!open || tracking.value) return
+      resetForm()
+      // mode 没变时 watch(mode) 不会触发，这里补一次（配置已加载时只做预选）
+      if (mode.value === 'download') void ensureDownloadConfig()
     },
 )
 
 watch(mode, (m) => {
+  applyAutoTarget()
   if (m === 'download') void ensureDownloadConfig()
 })
 
@@ -495,6 +575,10 @@ onBeforeUnmount(stopPolling)
 
 .cross-account__account {
   width: 100%;
+}
+
+.cross-account__default {
+  margin-top: 4px;
 }
 
 .cross-account__dir {
