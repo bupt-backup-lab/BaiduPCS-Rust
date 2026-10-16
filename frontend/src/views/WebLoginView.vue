@@ -19,15 +19,15 @@
           <el-form @submit.prevent="handlePasswordSubmit">
             <el-form-item>
               <el-input
-                ref="passwordInputRef"
-                v-model="password"
-                type="password"
-                placeholder="请输入访问密码"
-                size="large"
-                show-password
-                :disabled="isLoading || isLocked"
-                @keyup.enter="handlePasswordSubmit"
-                autocomplete="current-password"
+                  ref="passwordInputRef"
+                  v-model="password"
+                  type="password"
+                  placeholder="请输入访问密码"
+                  size="large"
+                  show-password
+                  :disabled="isLoading || isLocked"
+                  @keyup.enter="handlePasswordSubmit"
+                  autocomplete="current-password"
               >
                 <template #prefix>
                   <el-icon><Lock /></el-icon>
@@ -36,12 +36,12 @@
             </el-form-item>
 
             <el-button
-              type="primary"
-              size="large"
-              :loading="isLoading"
-              :disabled="isLocked"
-              @click="handlePasswordSubmit"
-              class="submit-btn"
+                type="primary"
+                size="large"
+                :loading="isLoading"
+                :disabled="isLocked"
+                @click="handlePasswordSubmit"
+                class="submit-btn"
             >
               {{ requiresOnlyPassword ? '登录' : '下一步' }}
             </el-button>
@@ -61,16 +61,16 @@
           <el-form @submit.prevent="handleTotpSubmit">
             <el-form-item>
               <el-input
-                ref="totpInputRef"
-                v-model="totpCode"
-                placeholder="请输入 6 位验证码"
-                size="large"
-                maxlength="6"
-                :disabled="isLoading || isLocked"
-                @keyup.enter="handleTotpSubmit"
-                inputmode="numeric"
-                pattern="[0-9]*"
-                autocomplete="one-time-code"
+                  ref="totpInputRef"
+                  v-model="totpCode"
+                  placeholder="请输入 6 位验证码"
+                  size="large"
+                  maxlength="6"
+                  :disabled="isLoading || isLocked"
+                  @keyup.enter="handleTotpSubmit"
+                  inputmode="numeric"
+                  pattern="[0-9]*"
+                  autocomplete="one-time-code"
               >
                 <template #prefix>
                   <el-icon><Key /></el-icon>
@@ -79,12 +79,12 @@
             </el-form-item>
 
             <el-button
-              type="primary"
-              size="large"
-              :loading="isLoading"
-              :disabled="isLocked"
-              @click="handleTotpSubmit"
-              class="submit-btn"
+                type="primary"
+                size="large"
+                :loading="isLoading"
+                :disabled="isLocked"
+                @click="handleTotpSubmit"
+                class="submit-btn"
             >
               验证
             </el-button>
@@ -101,24 +101,24 @@
 
         <!-- 恢复码输入（移动端使用抽屉，桌面端使用对话框） -->
         <el-drawer
-          v-if="isMobile"
-          v-model="showRecoveryInput"
-          title="使用恢复码登录"
-          direction="btt"
-          size="auto"
-          :close-on-click-modal="true"
+            v-if="isMobile"
+            v-model="showRecoveryInput"
+            title="使用恢复码登录"
+            direction="btt"
+            size="auto"
+            :close-on-click-modal="true"
         >
           <div class="recovery-drawer-content">
             <p class="recovery-hint">请输入您保存的恢复码，每个恢复码只能使用一次</p>
             <el-form @submit.prevent="handleRecoverySubmit">
               <el-form-item>
                 <el-input
-                  ref="recoveryInputRef"
-                  v-model="recoveryCode"
-                  placeholder="XXXX-XXXX"
-                  size="large"
-                  :disabled="isLoading"
-                  autocomplete="off"
+                    ref="recoveryInputRef"
+                    v-model="recoveryCode"
+                    placeholder="XXXX-XXXX"
+                    size="large"
+                    :disabled="isLoading"
+                    autocomplete="off"
                 >
                   <template #prefix>
                     <el-icon><Ticket /></el-icon>
@@ -136,22 +136,22 @@
         </el-drawer>
 
         <el-dialog
-          v-else
-          v-model="showRecoveryInput"
-          title="使用恢复码登录"
-          width="400px"
-          :close-on-click-modal="false"
+            v-else
+            v-model="showRecoveryInput"
+            title="使用恢复码登录"
+            width="400px"
+            :close-on-click-modal="false"
         >
           <p class="recovery-hint">请输入您保存的恢复码，每个恢复码只能使用一次</p>
           <el-form @submit.prevent="handleRecoverySubmit">
             <el-form-item>
               <el-input
-                ref="recoveryInputRef"
-                v-model="recoveryCode"
-                placeholder="XXXX-XXXX"
-                size="large"
-                :disabled="isLoading"
-                autocomplete="off"
+                  ref="recoveryInputRef"
+                  v-model="recoveryCode"
+                  placeholder="XXXX-XXXX"
+                  size="large"
+                  :disabled="isLoading"
+                  autocomplete="off"
               >
                 <template #prefix>
                   <el-icon><Ticket /></el-icon>
@@ -178,17 +178,17 @@
         <transition name="fade">
           <div v-if="lockoutRemaining && lockoutRemaining > 0" class="lockout-message">
             <el-alert
-              :title="`请求过于频繁，请在 ${lockoutRemaining} 秒后重试`"
-              type="warning"
-              :closable="false"
-              show-icon
+                :title="`请求过于频繁，请在 ${lockoutRemaining} 秒后重试`"
+                type="warning"
+                :closable="false"
+                show-icon
             />
             <div class="lockout-countdown">
               <el-progress
-                :percentage="lockoutProgress"
-                :show-text="false"
-                :stroke-width="4"
-                status="warning"
+                  :percentage="lockoutProgress"
+                  :show-text="false"
+                  :stroke-width="4"
+                  status="warning"
               />
             </div>
           </div>
@@ -289,7 +289,7 @@ function clearError() {
 function startLockoutCountdown(seconds: number) {
   stopLockoutCountdown()
   lockoutCountdown.value = seconds
-  
+
   lockoutTimer = setInterval(() => {
     if (lockoutCountdown.value !== null && lockoutCountdown.value > 0) {
       lockoutCountdown.value--
@@ -394,13 +394,6 @@ async function handleRecoverySubmit() {
   }
 }
 
-// 监听认证状态变化
-watch(() => webAuthStore.isAuthenticated, (isAuth) => {
-  if (isAuth) {
-    router.push('/login')
-  }
-})
-
 // 监听恢复码对话框打开
 watch(showRecoveryInput, (show) => {
   if (show) {
@@ -421,13 +414,11 @@ watch(() => webAuthStore.lockoutRemaining, (newVal) => {
 
 // 组件挂载
 onMounted(async () => {
-  // 初始化 store
-  webAuthStore.initialize()
-  
-  // 检查认证状态
+  // 检查认证状态（先等待 store 初始化完成，确保本地令牌已加载/刷新）
   try {
+    await webAuthStore.initialize()
     await webAuthStore.checkAuthStatus()
-    
+
     // 如果认证未启用或已认证，跳转到登录页
     if (!webAuthStore.isAuthEnabled || webAuthStore.isAuthenticated) {
       router.push('/login')
@@ -439,7 +430,7 @@ onMounted(async () => {
 
   // 重置登录流程
   webAuthStore.resetLoginFlow()
-  
+
   // 聚焦第一个输入框
   nextTick(() => {
     if (showPasswordStep.value) {
@@ -505,11 +496,11 @@ onUnmounted(() => {
 
   .back-link {
     margin-bottom: 16px;
-    
+
     .el-button {
       padding: 0;
       font-size: 14px;
-      
+
       .el-icon {
         margin-right: 4px;
       }
@@ -526,10 +517,10 @@ onUnmounted(() => {
   .recovery-link {
     text-align: center;
     margin-top: 16px;
-    
+
     .el-button {
       font-size: 14px;
-      
+
       .el-icon {
         margin-right: 4px;
       }
@@ -555,12 +546,12 @@ onUnmounted(() => {
 
 .recovery-drawer-content {
   padding: 0 4px;
-  
+
   .recovery-actions {
     display: flex;
     gap: 12px;
     margin-top: 16px;
-    
+
     .el-button {
       flex: 1;
     }
@@ -633,7 +624,7 @@ onUnmounted(() => {
 
   .recovery-link {
     margin-top: 20px;
-    
+
     .el-button {
       font-size: 15px;
       padding: 8px 0;
@@ -680,7 +671,7 @@ onUnmounted(() => {
 
   .header {
     margin-bottom: 16px;
-    
+
     .logo {
       margin-bottom: 8px;
     }

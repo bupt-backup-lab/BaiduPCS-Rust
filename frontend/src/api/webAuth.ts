@@ -113,7 +113,8 @@ export interface ApiErrorResponse {
 
 // ============ 令牌刷新回调类型 ============
 
-export type TokenRefreshCallback = (tokens: RefreshResponse) => void
+/** 刷新令牌处理器：成功返回新的 access token，失败返回 null（由 store 提供，保证单飞） */
+export type RefreshHandler = () => Promise<string | null>
 export type AuthFailureCallback = () => void
 
 // Web 认证专用 HTTP 状态码（与后端保持一致）
@@ -126,9 +127,7 @@ class WebAuthApiClient {
   private client: AxiosInstance
   private accessToken: string | null = null
   private refreshToken: string | null = null
-  private isRefreshing = false
-  private refreshSubscribers: Array<(token: string) => void> = []
-  private onTokenRefresh: TokenRefreshCallback | null = null
+  private refreshHandler: RefreshHandler | null = null
   private onAuthFailure: AuthFailureCallback | null = null
 
   constructor() {
@@ -143,9 +142,9 @@ class WebAuthApiClient {
     this.setupInterceptors()
   }
 
-  /** 设置令牌刷新回调 */
-  setTokenRefreshCallback(callback: TokenRefreshCallback) {
-    this.onTokenRefresh = callback
+  /** 设置令牌刷新处理器 */
+  setRefreshHandler(handler: RefreshHandler) {
+    this.refreshHandler = handler
   }
 
   /** 设置认证失败回调 */
@@ -171,87 +170,48 @@ class WebAuthApiClient {
   private setupInterceptors() {
     // 请求拦截器：添加 Authorization header
     this.client.interceptors.request.use(
-      (config) => {
-        if (this.accessToken) {
-          config.headers.Authorization = `Bearer ${this.accessToken}`
-        }
-        return config
-      },
-      (error) => Promise.reject(error)
+        (config) => {
+          if (this.accessToken) {
+            config.headers.Authorization = `Bearer ${this.accessToken}`
+          }
+          return config
+        },
+        (error) => Promise.reject(error)
     )
 
     // 响应拦截器：处理 419 错误和令牌刷新
     this.client.interceptors.response.use(
-      (response) => response,
-      async (error: AxiosError<ApiErrorResponse>) => {
-        const originalRequest = error.config
+        (response) => response,
+        async (error: AxiosError<ApiErrorResponse>) => {
+          const originalRequest = error.config
 
-        // 如果是 419 错误且不是刷新令牌请求
-        if (
-          error.response?.status === WEB_AUTH_EXPIRED_STATUS &&
-          originalRequest &&
-          !originalRequest.url?.includes('/refresh') &&
-          !originalRequest.url?.includes('/login')
-        ) {
-          // 如果正在刷新，等待刷新完成
-          if (this.isRefreshing) {
-            return new Promise((resolve) => {
-              this.refreshSubscribers.push((token: string) => {
+          // 如果是 419 错误且不是刷新令牌请求
+          if (
+              error.response?.status === WEB_AUTH_EXPIRED_STATUS &&
+              originalRequest &&
+              !originalRequest.url?.includes('/refresh') &&
+              !originalRequest.url?.includes('/login')
+          ) {
+            const retried = originalRequest as typeof originalRequest & { _retry?: boolean }
+            if (!retried._retry && this.refreshHandler) {
+              retried._retry = true
+              const token = await this.refreshHandler()
+              if (token) {
                 if (originalRequest.headers) {
                   originalRequest.headers.Authorization = `Bearer ${token}`
                 }
-                resolve(this.client(originalRequest))
-              })
-            })
-          }
-
-          // 尝试刷新令牌
-          if (this.refreshToken) {
-            this.isRefreshing = true
-
-            try {
-              const tokens = await this.refreshTokens({ refresh_token: this.refreshToken })
-              this.accessToken = tokens.access_token
-              this.refreshToken = tokens.refresh_token
-
-              // 通知回调
-              if (this.onTokenRefresh) {
-                this.onTokenRefresh(tokens)
+                return this.client(originalRequest)
               }
-
-              // 通知等待的请求
-              this.refreshSubscribers.forEach((callback) => callback(tokens.access_token))
-              this.refreshSubscribers = []
-
-              // 重试原始请求
-              if (originalRequest.headers) {
-                originalRequest.headers.Authorization = `Bearer ${tokens.access_token}`
-              }
-              return this.client(originalRequest)
-            } catch (refreshError) {
-              // 刷新失败，清除令牌并通知
-              this.accessToken = null
-              this.refreshToken = null
-              this.refreshSubscribers = []
-
-              if (this.onAuthFailure) {
-                this.onAuthFailure()
-              }
-
-              return Promise.reject(refreshError)
-            } finally {
-              this.isRefreshing = false
             }
-          } else {
-            // 没有刷新令牌，通知认证失败
+
+            // 刷新失败 / 没有刷新令牌 / 重试后仍 419，通知认证失败
             if (this.onAuthFailure) {
               this.onAuthFailure()
             }
           }
-        }
 
-        return Promise.reject(error)
-      }
+          return Promise.reject(error)
+        }
     )
   }
 

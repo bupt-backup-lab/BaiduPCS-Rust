@@ -107,8 +107,8 @@ const router = createRouter({
  * - 如果用户未认证，后端会返回 419，前端会自动跳转到登录页
  */
 
-// 标记是否已初始化 Web 认证
-let webAuthInitialized = false
+// 标记是否已获取过 Web 认证状态
+let webAuthStatusChecked = false
 // 标记是否已检查过百度登录状态
 let baiduAuthChecked = false
 
@@ -128,15 +128,18 @@ router.beforeEach(async (to, _from, next) => {
     return
   }
 
-  // 只在首次访问时初始化 Web 认证
-  if (!webAuthInitialized) {
-    webAuthInitialized = true
-    // 异步初始化，不阻塞路由
-    webAuthStore.initialize().then(() => {
-      webAuthStore.checkAuthStatus().catch(err => {
-        console.error('获取 Web 认证状态失败:', err)
-      })
-    })
+  // 首次访问时必须等待 Web 认证状态返回再继续：
+  // 若不等待，authConfig 仍为 null 会跳过下面的重定向，直接进入百度登录页，
+  // 而此时后端对百度相关接口统一返回 419（扫码二维码也无法生成）
+  if (!webAuthStatusChecked) {
+    try {
+      await webAuthStore.initialize()
+      await webAuthStore.checkAuthStatus()
+      webAuthStatusChecked = true
+    } catch (err) {
+      // 获取失败（如后端未就绪）不阻塞导航，下次导航重试
+      console.error('获取 Web 认证状态失败:', err)
+    }
   }
 
   // 如果已经知道需要认证且未通过，重定向到 Web 登录页

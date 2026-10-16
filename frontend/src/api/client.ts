@@ -1,6 +1,7 @@
 import axios, { type AxiosInstance, type AxiosResponse, type AxiosError, type InternalAxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
 import { backendHealth, isBackendDownError } from '../utils/backendHealth'
+import { useWebAuthStore } from '@/stores/webAuth'
 
 // 后端断开 / 恢复时的统一提示文案（避免轮询失败刷屏）
 const BACKEND_DOWN_MESSAGE = '无法连接后端服务，正在尝试重连…'
@@ -44,34 +45,13 @@ const WEB_AUTH_REFRESH_TOKEN_KEY = 'web_auth_refresh_token'
 
 // Web 认证专用 HTTP 状态码（与后端保持一致）
 // 419 表示 Web 认证令牌过期，区别于 401 百度账号认证失败
-const WEB_AUTH_EXPIRED_STATUS = 419
-
-// 令牌刷新状态
-let isRefreshing = false
-let refreshSubscribers: Array<(token: string) => void> = []
+export const WEB_AUTH_EXPIRED_STATUS = 419
 
 /**
  * 获取 Web 认证访问令牌
  */
 export function getWebAuthAccessToken(): string | null {
     return localStorage.getItem(WEB_AUTH_ACCESS_TOKEN_KEY)
-}
-
-/**
- * 获取 Web 认证刷新令牌
- */
-function getWebAuthRefreshToken(): string | null {
-    return localStorage.getItem(WEB_AUTH_REFRESH_TOKEN_KEY)
-}
-
-/**
- * 保存令牌到本地存储
- */
-function saveTokens(accessToken: string, refreshToken: string, accessExpiresAt: number, refreshExpiresAt: number): void {
-    localStorage.setItem(WEB_AUTH_ACCESS_TOKEN_KEY, accessToken)
-    localStorage.setItem(WEB_AUTH_REFRESH_TOKEN_KEY, refreshToken)
-    localStorage.setItem('web_auth_access_expires_at', accessExpiresAt.toString())
-    localStorage.setItem('web_auth_refresh_expires_at', refreshExpiresAt.toString())
 }
 
 /**
@@ -87,7 +67,7 @@ function clearWebAuthTokens(): void {
 /**
  * 跳转到 Web 登录页
  */
-function redirectToWebLogin(): void {
+export function redirectToWebLogin(): void {
     if (window.location.pathname !== '/web-login') {
         clearWebAuthTokens()
         window.location.href = '/web-login'
@@ -95,49 +75,45 @@ function redirectToWebLogin(): void {
 }
 
 /**
- * 刷新令牌
+ * 刷新令牌：统一委托给 webAuth store 的单飞刷新。
+ * 后端 refresh token 用一次即作废，各处自行刷新会互相把对方换到的令牌作废，
+ * 因此这里不再直接请求刷新接口。成功返回新 access token，失败返回 null。
+ *
+ * 先等 store 初始化：未初始化时 store 内 refreshToken 为空，直接刷新会走 clearTokens()，
+ * 把 localStorage 里仍有效的令牌清掉。（不能在 store.refreshTokens 内部等待，
+ * initialize() 自身会调用它，会死锁。）
  */
 async function refreshTokens(): Promise<string | null> {
-    const refreshToken = getWebAuthRefreshToken()
-    if (!refreshToken) {
-        return null
-    }
-
+    const webAuthStore = useWebAuthStore()
     try {
-        const response = await axios.post('/api/v1/web-auth/refresh', {
-            refresh_token: refreshToken
-        })
-
-        const { access_token, refresh_token, access_expires_at, refresh_expires_at } = response.data
-        saveTokens(access_token, refresh_token, access_expires_at, refresh_expires_at)
-        return access_token
-    } catch (error) {
-        console.error('令牌刷新失败:', error)
+        await webAuthStore.initialize()
+    } catch (err) {
+        console.error('Web 认证初始化失败:', err)
         return null
     }
+    const refreshed = await webAuthStore.refreshTokens()
+    return refreshed ? webAuthStore.accessToken : null
 }
 
 /**
- * 通知所有等待刷新的请求
+ * 重试原始请求：用不带拦截器的全局 axios 发送，返回原始 AxiosResponse，
+ * 交给本拦截器之后注册的响应拦截器按正常流程处理。
+ * 不能用 `client(originalRequest)`：那会让重试结果先走完整条拦截器链
+ * （已解包 / 已转成 Error），再被外层后续拦截器处理第二次。
  */
-function onRefreshed(token: string): void {
-    refreshSubscribers.forEach(callback => callback(token))
-    refreshSubscribers = []
-}
-
-/**
- * 添加等待刷新的请求
- */
-function addRefreshSubscriber(callback: (token: string) => void): void {
-    refreshSubscribers.push(callback)
+function retryRawRequest(config: InternalAxiosRequestConfig): Promise<AxiosResponse> {
+    return axios.request(config)
 }
 
 /**
  * 为 axios 实例添加 Web 认证拦截器
  * 自动在请求头中添加 Authorization header
  * 处理 419 Web 认证失败，尝试刷新令牌后重试请求
+ *
+ * 必须在实例的其它响应拦截器之前注册：重试返回原始 AxiosResponse，
+ * 由后续拦截器照常处理。
  */
-function addWebAuthInterceptor(client: AxiosInstance): void {
+export function addWebAuthInterceptor(client: AxiosInstance): void {
     // 请求拦截器：添加 Authorization header
     client.interceptors.request.use(
         (config) => {
@@ -156,40 +132,26 @@ function addWebAuthInterceptor(client: AxiosInstance): void {
         async (error: AxiosError) => {
             const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean }
 
-            // 如果是 419 错误且未重试过
+            // 如果是 419 错误且未重试过：先刷新令牌（并发请求共享同一次刷新），成功则重试
             if (error.response?.status === WEB_AUTH_EXPIRED_STATUS && originalRequest && !originalRequest._retry) {
-                // 如果正在刷新，等待刷新完成后重试
-                if (isRefreshing) {
-                    return new Promise((resolve) => {
-                        addRefreshSubscriber((token: string) => {
-                            originalRequest.headers.Authorization = `Bearer ${token}`
-                            resolve(client(originalRequest))
-                        })
-                    })
+                originalRequest._retry = true
+
+                const newToken = await refreshTokens()
+                if (!newToken) {
+                    // 刷新失败（没有 refresh token 或刷新接口返回错误）
+                    redirectToWebLogin()
+                    return Promise.reject(error)
                 }
 
-                originalRequest._retry = true
-                isRefreshing = true
-
+                originalRequest.headers.Authorization = `Bearer ${newToken}`
                 try {
-                    const newToken = await refreshTokens()
-
-                    if (newToken) {
-                        // 刷新成功，通知等待的请求并重试原始请求
-                        onRefreshed(newToken)
-                        originalRequest.headers.Authorization = `Bearer ${newToken}`
-                        return client(originalRequest)
-                    } else {
-                        // 刷新失败（没有 refresh token 或刷新接口返回错误）
+                    return await retryRawRequest(originalRequest)
+                } catch (retryError) {
+                    // 新令牌仍被拒绝，视为认证失效
+                    if ((retryError as AxiosError).response?.status === WEB_AUTH_EXPIRED_STATUS) {
                         redirectToWebLogin()
-                        return Promise.reject(error)
                     }
-                } catch (refreshError) {
-                    // 刷新过程出错
-                    redirectToWebLogin()
-                    return Promise.reject(refreshError)
-                } finally {
-                    isRefreshing = false
+                    return Promise.reject(retryError)
                 }
             }
 
