@@ -208,7 +208,7 @@ impl AppState {
         crate::common::cleanup_stale_tmp_files(std::path::Path::new("config"));
 
         // 加载配置
-        let config = AppConfig::load_or_default("config/app.toml").await;
+        let config = AppConfig::load_or_default(crate::config::APP_CONFIG_PATH).await?;
 
         // 分享直下临时目录按实例分命名空间（issue #162），必须在任何转存任务创建前确定
         crate::transfer::temp_cleanup::init_instance_id(std::path::Path::new("config"));

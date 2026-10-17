@@ -1361,6 +1361,12 @@ impl AppConfig {
             .await
             .context("Failed to read config file")?;
 
+        // 空文件多半是旧版本「先截断再写」被中途打断留下的，必须当作损坏处理，
+        // 不能当成「没有任何自定义项」而套用默认值
+        if content.trim().is_empty() {
+            anyhow::bail!("配置文件为空（可能在写入过程中被中断）");
+        }
+
         // 检测是否为旧配置格式（没有 conflict_strategy 字段）
         let is_legacy_config = !content.contains("conflict_strategy");
 
@@ -1475,41 +1481,72 @@ impl AppConfig {
         Ok(())
     }
 
-    /// 加载或创建默认配置
-    pub async fn load_or_default(path: &str) -> Self {
+    /// 加载配置；仅当配置文件不存在时才创建默认配置
+    ///
+    /// 文件存在但读取、解析或校验失败时直接返回错误、拒绝启动，**绝不**用默认值
+    /// 覆盖：否则密码保护等设置会被静默关闭，原文件也无从恢复（issue #177）。
+    pub async fn load_or_default(path: &str) -> Result<Self> {
+        match fs::metadata(path).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::create_default(path).await);
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("无法访问配置文件 {}", path));
+            }
+        }
+
         match Self::load_from_file(path).await {
             Ok(config) => {
                 tracing::info!("配置文件加载成功: {}", path);
-                config
+                Ok(config)
             }
             Err(e) => {
-                tracing::warn!("配置文件加载失败，使用默认配置: {}", e);
-                let default_config = Self::default();
-
-                // 首次启动：自动创建默认下载目录
-                if !default_config.download.download_dir.exists() {
-                    if let Err(e) = std::fs::create_dir_all(&default_config.download.download_dir) {
-                        tracing::error!(
-                            "无法创建默认下载目录 {:?}: {}",
-                            default_config.download.download_dir,
-                            e
-                        );
-                    } else {
-                        tracing::info!(
-                            "✓ 已创建默认下载目录: {:?}",
-                            default_config.download.download_dir
-                        );
-                    }
-                }
-
-                // 尝试保存默认配置
-                if let Err(e) = default_config.save_to_file(path).await {
-                    tracing::error!("保存默认配置失败: {}", e);
-                }
-
-                default_config
+                tracing::error!(
+                    "\n========================================\n\
+                     [启动失败] 配置文件无法加载: {}\n\
+                     错误原因: {:#}\n\
+                     \n\
+                     为避免覆盖您的设置（包括 Web 访问密码等），程序不会使用默认配置启动。\n\
+                     请修正该文件后重启；如需恢复默认配置，可将其改名或删除后重启。\n\
+                     ========================================",
+                    path,
+                    e
+                );
+                // 原因已在上方横幅里完整输出；这里只返回简短消息，
+                // 避免 main 返回 Err 时 Rust 再把原因链打印一遍
+                Err(anyhow::anyhow!("配置文件 {} 加载失败，详见上方日志", path))
             }
         }
+    }
+
+    /// 首次启动：生成默认配置并尝试写盘
+    async fn create_default(path: &str) -> Self {
+        tracing::info!("配置文件不存在，使用默认配置: {}", path);
+        let default_config = Self::default();
+
+        // 首次启动：自动创建默认下载目录
+        if !default_config.download.download_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(&default_config.download.download_dir) {
+                tracing::error!(
+                    "无法创建默认下载目录 {:?}: {}",
+                    default_config.download.download_dir,
+                    e
+                );
+            } else {
+                tracing::info!(
+                    "✓ 已创建默认下载目录: {:?}",
+                    default_config.download.download_dir
+                );
+            }
+        }
+
+        // 尝试保存默认配置
+        if let Err(e) = default_config.save_to_file(path).await {
+            tracing::error!("保存默认配置失败: {}", e);
+        }
+
+        default_config
     }
 }
 
@@ -1628,6 +1665,42 @@ mod tests {
             loaded.download.max_global_threads,
             config.download.max_global_threads
         );
+    }
+
+    /// issue #177 回归：配置文件存在但解析 / 校验失败时必须报错，且不得用默认值覆盖原文件
+    #[tokio::test]
+    async fn test_load_or_default_refuses_to_overwrite_broken_config() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let path = temp_dir.path().join("app.toml");
+        let path_str = path.to_str().unwrap();
+
+        // 能正常解析、但下载目录为相对路径 → 校验失败
+        let mut relative_dir = AppConfig::default();
+        relative_dir.download.download_dir = PathBuf::from("downloads");
+        let relative_dir = toml::to_string_pretty(&relative_dir).unwrap();
+
+        let cases = [
+            (
+                "语法错误",
+                "[server
+port = 1"
+                    .to_string(),
+            ),
+            ("空文件（写入中断）", String::new()),
+            ("校验失败（下载目录非绝对路径）", relative_dir),
+        ];
+        for (name, content) in cases {
+            std::fs::write(&path, &content).unwrap();
+            assert!(
+                AppConfig::load_or_default(path_str).await.is_err(),
+                "{name}: 应拒绝启动"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                content,
+                "{name}: 原文件不应被改动"
+            );
+        }
     }
 
     /// 分享同步词表：默认为空（不做预置，完全由用户配置）；已保存的词表可正常读回。

@@ -179,13 +179,30 @@ async fn ensure_download_dir_accessible(download_dir: &std::path::Path) {
 async fn init_web_auth_state(
     config: &baidu_netdisk_rust::config::WebAuthConfig,
     app_config: Arc<tokio::sync::RwLock<baidu_netdisk_rust::config::AppConfig>>,
-) -> Arc<WebAuthState> {
-    use baidu_netdisk_rust::web_auth::create_auth_store;
+) -> anyhow::Result<Arc<WebAuthState>> {
+    use baidu_netdisk_rust::web_auth::{create_auth_store, DEFAULT_AUTH_STORE_PATH};
 
     // 创建凭证存储并加载
+    // 凭证文件存在却读不出来时拒绝启动：用空凭证继续会让密码 / 2FA 失效，
+    // 之后再设置密码还会覆盖掉原文件
     let auth_store = Arc::new(create_auth_store());
     if let Err(e) = auth_store.load().await {
-        tracing::warn!("加载认证凭证失败，使用空凭证: {}", e);
+        tracing::error!(
+            "\n========================================\n\
+             [启动失败] 认证凭证文件无法加载: {}\n\
+             错误原因: {}\n\
+             \n\
+             为避免 Web 访问密码 / 双因素认证失效，程序不会以空凭证启动。\n\
+             请修正该文件后重启；如确认要清空认证凭证，可将其改名或删除后重启。\n\
+             ========================================",
+            DEFAULT_AUTH_STORE_PATH,
+            e
+        );
+        // 原因已在横幅里输出，这里只给简短消息，避免终端重复打印
+        anyhow::bail!(
+            "认证凭证文件 {} 加载失败，详见上方日志",
+            DEFAULT_AUTH_STORE_PATH
+        );
     }
 
     // 获取凭证
@@ -205,7 +222,7 @@ async fn init_web_auth_state(
     // 根据认证模式启动清理任务
     state.start_cleanup_tasks().await;
 
-    state
+    Ok(state)
 }
 
 #[tokio::main]
@@ -284,7 +301,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 🔥 初始化 Web 认证状态
     let web_auth_state =
-        init_web_auth_state(&config.web_auth, Arc::clone(&app_state.config)).await;
+        init_web_auth_state(&config.web_auth, Arc::clone(&app_state.config)).await?;
     info!("Web 认证状态初始化完成 (模式: {:?})", config.web_auth.mode);
 
     // 配置中间件层
