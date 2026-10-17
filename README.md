@@ -285,7 +285,17 @@ decrypt-cli decrypt --key-file encryption.json --in file.dat --out file.txt --ke
 
 ## 📋 最新版本
 
-### v2.3.1 (当前版本)
+### v2.3.2 (当前版本)
+
+**维护版本**：在 `v2.3.1` 基础上堵住**开启 Web 认证后被旧配置写回、重启认证被关掉**；配置文件改为原子写入，读坏时拒绝启动而不是用默认配置覆盖；`docker stop` 走优雅关闭。
+
+**问题修复：**
+- 🐛 **Web 认证·开启密码 / 2FA 后重启被关掉（重要）**：认证开关只写了文件、没改内存里的主配置，之后任意一次保存 `app.toml`（转存成功、设置页保存等）会把启动时的旧开关写回去。现认证开关写进共享配置再落盘，落盘失败时运行时保持原样
+- 🐛 **配置·读取或校验失败时用默认配置覆盖原文件（重要）**：`app.toml` 读坏、解析失败或校验不过时，以前 warn 一声就用默认配置覆盖写回去，密码保护被静默关闭且原文件无从恢复。现文件存在但读失败一律拒绝启动；只有文件不存在才创建默认配置。认证凭证文件同口径
+- 🐛 **配置·写入中断留下截断文件**：直接 `fs::write` 会先截断再写，进程被杀或断电后下次启动读出空文件 / 半截 TOML。现 `app.toml`、认证凭证、会话、加密密钥、自动备份配置改为同目录临时文件 + `fsync` + `rename`
+- 🐛 **Docker·`docker stop` 不走优雅关闭**：容器里程序是 PID 1，内核不会对 PID 1 执行 SIGTERM 的默认终止；不显式处理就会被忽略，10 秒后 SIGKILL 强杀。现 Unix 下同时监听 SIGTERM 与 Ctrl+C，走同一套优雅关闭
+
+### v2.3.1
 
 **维护版本**：在 `v2.3.0` 基础上补齐「用其他账号下载」的默认账号，并修分享失败原因被吞、分享同步重启后续跑卡住、开启 Web 认证后进百度登录页扫码 419。
 
@@ -882,9 +892,9 @@ open http://localhost:18888
 从 [Releases](https://github.com/komorebiCarry/BaiduPCS-Rust/releases) 下载对应架构的压缩包（Apple Silicon 选 `macos-arm64`，Intel 选 `macos-x86_64`）：
 
 ```bash
-# 1. 解压（以 v2.3.1 为例）
-unzip BaiduPCS-Rust-v2.3.1-macos-arm64.zip
-cd BaiduPCS-Rust-v2.3.1-macos-arm64
+# 1. 解压（以 v2.3.2 为例）
+unzip BaiduPCS-Rust-v2.3.2-macos-arm64.zip
+cd BaiduPCS-Rust-v2.3.2-macos-arm64
 
 # 2. 解除 Gatekeeper 隔离标记（必需）
 xattr -dr com.apple.quarantine .
