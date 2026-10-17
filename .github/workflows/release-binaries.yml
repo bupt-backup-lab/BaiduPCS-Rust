@@ -123,9 +123,9 @@ jobs:
 
           cp -R frontend/dist "$PKG_DIR/frontend"
           mkdir -p "$PKG_DIR/config"
-          # 复制配置文件示例，同时创建实际的配置文件供用户使用
+          # 只放示例，不放 app.toml：首次启动时程序会自动生成默认配置；
+          # 若打包实际配置文件，用户解压覆盖升级时会把自己的配置（含 Web 访问密码开关）冲掉
           cp config/app.toml.example "$PKG_DIR/config/app.toml.example"
-          cp config/app.toml.example "$PKG_DIR/config/app.toml"
           cp README.md "$PKG_DIR/README.md"
 
           echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV

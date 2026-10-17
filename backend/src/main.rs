@@ -91,7 +91,7 @@ fn detect_frontend_dir() -> PathBuf {
 /// 尝试从配置文件加载，失败时返回默认配置
 async fn load_log_config() -> LogConfig {
     // 尝试读取配置文件中的日志配置
-    let config_path = "config/app.toml";
+    let config_path = baidu_netdisk_rust::config::APP_CONFIG_PATH;
     if let Ok(content) = tokio::fs::read_to_string(config_path).await {
         if let Ok(config) = toml::from_str::<toml::Value>(&content) {
             if let Some(log_table) = config.get("log") {
@@ -175,15 +175,34 @@ async fn ensure_download_dir_accessible(download_dir: &std::path::Path) {
 /// 初始化 Web 认证状态
 ///
 /// 从配置和凭证文件加载认证状态，并根据认证模式启动清理任务。
+/// `app_config` 与 AppState 共享，认证开关变更时写回它再落盘。
 async fn init_web_auth_state(
     config: &baidu_netdisk_rust::config::WebAuthConfig,
-) -> Arc<WebAuthState> {
-    use baidu_netdisk_rust::web_auth::create_auth_store;
+    app_config: Arc<tokio::sync::RwLock<baidu_netdisk_rust::config::AppConfig>>,
+) -> anyhow::Result<Arc<WebAuthState>> {
+    use baidu_netdisk_rust::web_auth::{create_auth_store, DEFAULT_AUTH_STORE_PATH};
 
     // 创建凭证存储并加载
+    // 凭证文件存在却读不出来时拒绝启动：用空凭证继续会让密码 / 2FA 失效，
+    // 之后再设置密码还会覆盖掉原文件
     let auth_store = Arc::new(create_auth_store());
     if let Err(e) = auth_store.load().await {
-        tracing::warn!("加载认证凭证失败，使用空凭证: {}", e);
+        tracing::error!(
+            "\n========================================\n\
+             [启动失败] 认证凭证文件无法加载: {}\n\
+             错误原因: {}\n\
+             \n\
+             为避免 Web 访问密码 / 双因素认证失效，程序不会以空凭证启动。\n\
+             请修正该文件后重启；如确认要清空认证凭证，可将其改名或删除后重启。\n\
+             ========================================",
+            DEFAULT_AUTH_STORE_PATH,
+            e
+        );
+        // 原因已在横幅里输出，这里只给简短消息，避免终端重复打印
+        anyhow::bail!(
+            "认证凭证文件 {} 加载失败，详见上方日志",
+            DEFAULT_AUTH_STORE_PATH
+        );
     }
 
     // 获取凭证
@@ -195,14 +214,45 @@ async fn init_web_auth_state(
         credentials,
         None, // JWT 密钥自动生成
         auth_store,
-    );
+    )
+    .with_app_config(app_config, baidu_netdisk_rust::config::APP_CONFIG_PATH);
 
     let state = Arc::new(state);
 
     // 根据认证模式启动清理任务
     state.start_cleanup_tasks().await;
 
-    state
+    Ok(state)
+}
+
+/// 等待关闭信号：Ctrl+C（SIGINT），Unix 下还有 SIGTERM
+///
+/// 容器里程序是 PID 1，内核不会对 PID 1 执行 SIGTERM 的默认动作（终止）；
+/// 不显式处理的话 `docker stop` 发的 SIGTERM 会被忽略，10 秒后被 SIGKILL 强杀，
+/// 走不到下面的优雅关闭流程。
+async fn shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => "Ctrl+C",
+                    _ = sigterm.recv() => "SIGTERM",
+                }
+            }
+            Err(e) => {
+                tracing::warn!("注册 SIGTERM 处理失败，仅监听 Ctrl+C: {}", e);
+                let _ = tokio::signal::ctrl_c().await;
+                "Ctrl+C"
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl+C"
+    }
 }
 
 #[tokio::main]
@@ -280,7 +330,8 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.server.host, config.server.port);
 
     // 🔥 初始化 Web 认证状态
-    let web_auth_state = init_web_auth_state(&config.web_auth).await;
+    let web_auth_state =
+        init_web_auth_state(&config.web_auth, Arc::clone(&app_state.config)).await?;
     info!("Web 认证状态初始化完成 (模式: {:?})", config.web_auth.mode);
 
     // 配置中间件层
@@ -769,8 +820,8 @@ async fn main() -> anyhow::Result<()> {
                 tracing::error!("服务器错误: {}", e);
             }
         }
-        _ = tokio::signal::ctrl_c() => {
-            info!("收到 Ctrl+C，开始优雅关闭...");
+        signal = shutdown_signal() => {
+            info!("收到 {}，开始优雅关闭...", signal);
         }
     }
 

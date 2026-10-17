@@ -3,14 +3,15 @@
 use crate::config::{AppConfig, TransferConfig};
 use crate::downloader::{DownloadManager, FolderDownloadManager, FolderStatus, TaskStatus};
 use crate::netdisk::NetdiskClient;
-use crate::persistence::{
-    PersistenceManager, TaskMetadata, TransferRecoveryInfo,
-};
+use crate::persistence::{PersistenceManager, TaskMetadata, TransferRecoveryInfo};
 use crate::server::events::{TaskEvent, TransferEvent};
 use crate::server::websocket::WebSocketManager;
 use crate::transfer::task::{TransferStatus, TransferTask};
 use crate::transfer::temp_cleanup;
-use crate::transfer::types::{BatchGroupInfo, CleanupResult, CleanupStatus, ShareLink, SharePageInfo, SharedFileInfo, TransferResult};
+use crate::transfer::types::{
+    BatchGroupInfo, CleanupResult, CleanupStatus, ShareLink, SharePageInfo, SharedFileInfo,
+    TransferResult,
+};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
@@ -332,7 +333,12 @@ impl TransferManager {
             share_info.shareid
         };
 
-        info!("预览: 获取到 {} 个文件, uk={}, shareid={}", list_result.files.len(), uk, shareid);
+        info!(
+            "预览: 获取到 {} 个文件, uk={}, shareid={}",
+            list_result.files.len(),
+            uk,
+            shareid
+        );
         Ok(PreviewShareResult {
             files: list_result.files,
             short_key: share_info.short_key.clone(),
@@ -397,7 +403,10 @@ impl TransferManager {
         &self,
         request: CreateTransferRequest,
     ) -> Result<CreateTransferResponse> {
-        info!("创建转存任务: url={}, is_share_direct_download={}", request.share_url, request.is_share_direct_download);
+        info!(
+            "创建转存任务: url={}, is_share_direct_download={}",
+            request.share_url, request.is_share_direct_download
+        );
 
         // 🔥 effective_uid 在 task 创建前就确定
         //
@@ -411,7 +420,11 @@ impl TransferManager {
         let effective_uid = request.owner_uid_override.unwrap_or(self.owner_uid);
 
         // 1. 解析分享链接
-        let share_link = self.client.read().unwrap().parse_share_link(&request.share_url)?;
+        let share_link = self
+            .client
+            .read()
+            .unwrap()
+            .parse_share_link(&request.share_url)?;
 
         // 合并密码：请求中的密码 > 链接中的密码
         let password = request.password.or(share_link.password.clone());
@@ -448,7 +461,12 @@ impl TransferManager {
                     config.default_behavior == "transfer_and_download"
                 }
             };
-            (request.save_path.clone(), request.save_fs_id, auto_download, None)
+            (
+                request.save_path.clone(),
+                request.save_fs_id,
+                auto_download,
+                None,
+            )
         };
 
         // 3. 创建任务（多账号：链调 with_owner_uid 用 effective_uid，避免事后 override）
@@ -460,7 +478,7 @@ impl TransferManager {
             auto_download,
             request.local_download_path.clone(),
         )
-            .with_owner_uid(effective_uid);
+        .with_owner_uid(effective_uid);
 
         // 设置分享直下相关字段
         if request.is_share_direct_download {
@@ -607,7 +625,7 @@ impl TransferManager {
 
                     owner_uid: Some(effective_uid.raw()),
                 })
-                    .await;
+                .await;
 
                 // 启动异步执行
                 self.spawn_task_execution(task_id.clone(), share_link, cancellation_token)
@@ -625,7 +643,8 @@ impl TransferManager {
 
                 // 检查是否需要密码
                 if (err_msg.contains("需要密码") || err_msg.contains("need password"))
-                    && password.is_none() {
+                    && password.is_none()
+                {
                     return Ok(CreateTransferResponse {
                         task_id: None,
                         status: None,
@@ -691,7 +710,7 @@ impl TransferManager {
                 share_link,
                 cancellation_token,
             )
-                .await;
+            .await;
 
             if let Err(e) = result {
                 // `{:#}` 展开完整 anyhow 链：这个串会直接写进任务状态给用户看，
@@ -806,7 +825,6 @@ impl TransferManager {
             t.randsk.clone()
         };
 
-
         // 检查取消
         if cancellation_token.is_cancelled() {
             return Ok(());
@@ -817,7 +835,9 @@ impl TransferManager {
         // 如果是全选模式（selected_fs_ids 为空），需要循环分页拉取全部 fs_id
         let has_selected_fs_ids = {
             let t = task.read().await;
-            t.selected_fs_ids.as_ref().is_some_and(|ids| !ids.is_empty())
+            t.selected_fs_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.is_empty())
         };
 
         // 根目录响应里的 uk/shareid 才是权威值：access_share_page 常常提取不到 uk
@@ -833,7 +853,12 @@ impl TransferManager {
             let result = client
                 .list_share_files_for(&share_info, 1, 100, randsk.as_deref())
                 .await?;
-            (result.files, result.share_root_path, result.uk, result.shareid)
+            (
+                result.files,
+                result.share_root_path,
+                result.uk,
+                result.shareid,
+            )
         } else {
             // 全选模式，循环分页拉取全部
             let mut all_files = Vec::new();
@@ -888,8 +913,7 @@ impl TransferManager {
             // 同步持久化到 WAL 元数据，确保任务恢复 / 复用历史信息时仍能拿到权威分享根
             if let Some(ref pm_arc) = persistence_manager {
                 let pm = pm_arc.lock().await;
-                if let Err(e) =
-                    pm.update_share_root_path(task_id, share_root_path_from_api.clone())
+                if let Err(e) = pm.update_share_root_path(task_id, share_root_path_from_api.clone())
                 {
                     warn!("持久化分享根路径失败: task_id={}, error={}", task_id, e);
                 }
@@ -911,8 +935,13 @@ impl TransferManager {
             }
         } else if let Some(ref selected) = selected_fs_ids_snapshot {
             if !selected.is_empty() {
-                let selected_set: std::collections::HashSet<u64> = selected.iter().copied().collect();
-                file_list.iter().filter(|f| selected_set.contains(&f.fs_id)).cloned().collect::<Vec<_>>()
+                let selected_set: std::collections::HashSet<u64> =
+                    selected.iter().copied().collect();
+                file_list
+                    .iter()
+                    .filter(|f| selected_set.contains(&f.fs_id))
+                    .cloned()
+                    .collect::<Vec<_>>()
             } else {
                 file_list.clone()
             }
@@ -947,7 +976,11 @@ impl TransferManager {
                 Some(filtered_file_list[0].name.clone())
             } else {
                 // 多个文件，使用第一个文件名 + 等x个文件
-                Some(format!("{} 等{}个文件", filtered_file_list[0].name, filtered_file_list.len()))
+                Some(format!(
+                    "{} 等{}个文件",
+                    filtered_file_list[0].name,
+                    filtered_file_list.len()
+                ))
             }
         } else {
             None
@@ -1016,10 +1049,17 @@ impl TransferManager {
         // 执行转存
         let (save_path, save_fs_id, is_share_direct_download) = {
             let t = task.read().await;
-            (t.save_path.clone(), t.save_fs_id, t.is_share_direct_download)
+            (
+                t.save_path.clone(),
+                t.save_fs_id,
+                t.is_share_direct_download,
+            )
         };
 
-        info!("转存参数: save_path={}, is_share_direct_download={}", save_path, is_share_direct_download);
+        info!(
+            "转存参数: save_path={}, is_share_direct_download={}",
+            save_path, is_share_direct_download
+        );
 
         // 分享直下模式：转存前先在网盘上创建临时目录
         if is_share_direct_download {
@@ -1039,7 +1079,10 @@ impl TransferManager {
                 Ok(resp) => {
                     let actual = resp.path.trim_end_matches('/');
                     if !actual.is_empty() && actual != expected_sub {
-                        warn!("临时目录被百度重命名: 期望={}, 实际={}", expected_sub, actual);
+                        warn!(
+                            "临时目录被百度重命名: 期望={}, 实际={}",
+                            expected_sub, actual
+                        );
                         let _ = client.delete_files(&[actual.to_string()]).await;
                         anyhow::bail!("创建临时目录失败: 路径被百度重命名为 {}", actual);
                     }
@@ -1082,14 +1125,13 @@ impl TransferManager {
             let dup_count = fs_ids.len() - unique_count;
 
             // 🔥 统计同名文件（basename 维度）- 基于 filtered_file_list（真实选择集）
-            let mut name_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            let mut name_counts: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
             for f in &filtered_file_list {
                 *name_counts.entry(f.name.as_str()).or_insert(0) += 1;
             }
-            let mut dup_basenames: Vec<(&str, usize)> = name_counts
-                .into_iter()
-                .filter(|(_, c)| *c > 1)
-                .collect();
+            let mut dup_basenames: Vec<(&str, usize)> =
+                name_counts.into_iter().filter(|(_, c)| *c > 1).collect();
             dup_basenames.sort_by(|a, b| b.1.cmp(&a.1));
             dup_basenames.truncate(10);
 
@@ -1111,9 +1153,13 @@ impl TransferManager {
             );
 
             // 🔥 诊断日志：真实选择集里的跨目录同名 basename 列表
-            let mut basename_to_paths: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+            let mut basename_to_paths: std::collections::HashMap<&str, Vec<&str>> =
+                std::collections::HashMap::new();
             for f in &filtered_file_list {
-                basename_to_paths.entry(f.name.as_str()).or_default().push(f.path.as_str());
+                basename_to_paths
+                    .entry(f.name.as_str())
+                    .or_default()
+                    .push(f.path.as_str());
             }
             let cross_dir_duplicates: Vec<(&str, Vec<&str>)> = basename_to_paths
                 .into_iter()
@@ -1170,12 +1216,16 @@ impl TransferManager {
         let mut effective_total_units = fs_ids.len();
 
         // ========== 转存策略：统一按原始父目录分组，保留完整目录结构 ==========
-        let (transfer_result, batch_groups_info): (Result<TransferResult>, Option<Vec<BatchGroupInfo>>) = {
+        let (transfer_result, batch_groups_info): (
+            Result<TransferResult>,
+            Option<Vec<BatchGroupInfo>>,
+        ) = {
             let task_share_root_path = {
                 let t = task.read().await;
                 t.share_root_path.clone()
             };
-            let share_root = derive_share_root(task_share_root_path.as_deref(), &filtered_file_list);
+            let share_root =
+                derive_share_root(task_share_root_path.as_deref(), &filtered_file_list);
             // 先按父目录分组还原目录结构，再按上限把每组切成多批。
             //
             // 这一步是**零请求**的：只按选中项个数切，一个组里塞了 1200 个文件时
@@ -1196,19 +1246,27 @@ impl TransferManager {
             let cross_dir_dups = detect_cross_dir_duplicates(&filtered_file_list);
             if !cross_dir_dups.is_empty() {
                 warn!(
-                        "检测到 {} 个跨目录同名 basename: {:?}",
-                        cross_dir_dups.len(),
-                        cross_dir_dups.iter().take(10).collect::<Vec<_>>()
-                    );
+                    "检测到 {} 个跨目录同名 basename: {:?}",
+                    cross_dir_dups.len(),
+                    cross_dir_dups.iter().take(10).collect::<Vec<_>>()
+                );
             }
             info!(
-                    "按父目录分组转存: {} 个目录组, share_root={}, 每组文件数: {:?}",
-                    total_groups,
-                    share_root,
-                    groups.iter().map(|(id, f)| format!("{}={}", if id.is_empty() { "<root>" } else { id }, f.len())).collect::<Vec<_>>()
-                );
+                "按父目录分组转存: {} 个目录组, share_root={}, 每组文件数: {:?}",
+                total_groups,
+                share_root,
+                groups
+                    .iter()
+                    .map(|(id, f)| format!(
+                        "{}={}",
+                        if id.is_empty() { "<root>" } else { id },
+                        f.len()
+                    ))
+                    .collect::<Vec<_>>()
+            );
 
-            let mut all_results: Vec<(usize, String, Vec<SharedFileInfo>, Result<TransferResult>)> = Vec::new();
+            let mut all_results: Vec<(usize, String, Vec<SharedFileInfo>, Result<TransferResult>)> =
+                Vec::new();
 
             // 确保 save_path 本身存在（普通转存可能复用历史路径，路径被删后会导致 errno=2）
             // 分享直下模式下，临时目录已在上方正确创建，此处跳过。
@@ -1234,15 +1292,25 @@ impl TransferManager {
                 };
 
                 info!(
-                        "转存批次 {}/{}: {} 个文件 -> {} (原始父目录={})",
-                        batch_num, total_groups, group_files.len(), group_target_dir,
-                        if relative_parent.is_empty() { "<root>" } else { &relative_parent }
-                    );
+                    "转存批次 {}/{}: {} 个文件 -> {} (原始父目录={})",
+                    batch_num,
+                    total_groups,
+                    group_files.len(),
+                    group_target_dir,
+                    if relative_parent.is_empty() {
+                        "<root>"
+                    } else {
+                        &relative_parent
+                    }
+                );
 
                 // 预建目标目录（百度转存 API 不会自动创建目标路径）
                 if !relative_parent.is_empty() {
                     if let Err(e) = ensure_dirs_exist(&client, &group_target_dir).await {
-                        warn!("预建批次目录失败（将在转存时重试）: {}, error={}", group_target_dir, e);
+                        warn!(
+                            "预建批次目录失败（将在转存时重试）: {}, error={}",
+                            group_target_dir, e
+                        );
                     }
                 }
 
@@ -1265,7 +1333,10 @@ impl TransferManager {
                     Ok(r) if !r.success => {
                         let err_msg = r.error.as_deref().unwrap_or("");
                         if err_msg.contains("errno\":2") || err_msg.contains("路径不存在") {
-                            warn!("批次 {} 路径不存在，逐级创建目录后重试: {}", batch_num, group_target_dir);
+                            warn!(
+                                "批次 {} 路径不存在，逐级创建目录后重试: {}",
+                                batch_num, group_target_dir
+                            );
                             if let Err(e) = ensure_dirs_exist(&client, &group_target_dir).await {
                                 warn!("重试时创建目录失败: {}", e);
                             }
@@ -1334,53 +1405,53 @@ impl TransferManager {
                 // 用 share-sync 同一套 tree 精确拆分后重提。没超限的转存一路零额外请求。
                 let result = match &result {
                     Ok(r)
-                    if !r.success
-                        && is_file_limit_exceeded(r.error.as_deref().unwrap_or("")) =>
-                        {
-                            warn!(
+                        if !r.success
+                            && is_file_limit_exceeded(r.error.as_deref().unwrap_or("")) =>
+                    {
+                        warn!(
                             "批次 {}/{} 撞到转存文件数上限，开始抓取该批子树并拆分重提: {} 个条目 -> {}",
                             batch_num,
                             total_groups,
                             group_files.len(),
                             group_target_dir
                         );
-                            // 失败的那次转存百度可能已按 ondup 建出改名的空壳目录，先清掉
-                            cleanup_ondup_shells(&client, &group_target_dir, &group_files).await;
+                        // 失败的那次转存百度可能已按 ondup 建出改名的空壳目录，先清掉
+                        cleanup_ondup_shells(&client, &group_target_dir, &group_files).await;
 
-                            let dir_ctx = ShareDirCtx {
-                                client: &client,
-                                short_key: &share_info.short_key,
-                                shareid: &list_shareid,
-                                uk: &list_uk,
-                                bdstoken: &share_info.bdstoken,
-                                kind: share_info.kind,
-                                randsk: randsk.as_deref(),
-                                rate_limiter: Arc::clone(&scan_rate_limiter),
-                                cache: Arc::clone(&dir_children_cache),
-                            };
-                            match split_over_limit_batch(
-                                &dir_ctx,
-                                &share_info,
-                                group_files.clone(),
-                                &group_target_dir,
-                                task_id,
-                                randsk.as_deref(),
-                            )
-                                .await
-                            {
-                                Ok((r, unit_total)) => {
-                                    // 下钻把目录换成了子项，进度分母要跟着长，
-                                    // 否则会显示成「34/8」这种转存数大于总数的样子
-                                    effective_total_units = adjust_total_units(
-                                        effective_total_units,
-                                        group_files.len(),
-                                        unit_total,
-                                    );
-                                    Ok(r)
-                                }
-                                Err(e) => Err(e),
+                        let dir_ctx = ShareDirCtx {
+                            client: &client,
+                            short_key: &share_info.short_key,
+                            shareid: &list_shareid,
+                            uk: &list_uk,
+                            bdstoken: &share_info.bdstoken,
+                            kind: share_info.kind,
+                            randsk: randsk.as_deref(),
+                            rate_limiter: Arc::clone(&scan_rate_limiter),
+                            cache: Arc::clone(&dir_children_cache),
+                        };
+                        match split_over_limit_batch(
+                            &dir_ctx,
+                            &share_info,
+                            group_files.clone(),
+                            &group_target_dir,
+                            task_id,
+                            randsk.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok((r, unit_total)) => {
+                                // 下钻把目录换成了子项，进度分母要跟着长，
+                                // 否则会显示成「34/8」这种转存数大于总数的样子
+                                effective_total_units = adjust_total_units(
+                                    effective_total_units,
+                                    group_files.len(),
+                                    unit_total,
+                                );
+                                Ok(r)
                             }
+                            Err(e) => Err(e),
                         }
+                    }
                     _ => result,
                 };
 
@@ -1389,9 +1460,9 @@ impl TransferManager {
                     Err(_) => false,
                 };
                 info!(
-                        "批次 {}/{} 结果: success={}",
-                        batch_num, total_groups, batch_ok
-                    );
+                    "批次 {}/{} 结果: success={}",
+                    batch_num, total_groups, batch_ok
+                );
 
                 all_results.push((batch_num, relative_parent, group_files, result));
 
@@ -1496,13 +1567,18 @@ impl TransferManager {
                             match client.get_file_list(td, 1, 100).await {
                                 Ok(snapshot) => {
                                     let total = snapshot.list.len();
-                                    let items: Vec<String> = snapshot.list.iter().take(20).map(|f| {
-                                        format!(
-                                            "{}({})",
-                                            f.server_filename,
-                                            if f.isdir == 1 { "dir" } else { "file" }
-                                        )
-                                    }).collect();
+                                    let items: Vec<String> = snapshot
+                                        .list
+                                        .iter()
+                                        .take(20)
+                                        .map(|f| {
+                                            format!(
+                                                "{}({})",
+                                                f.server_filename,
+                                                if f.isdir == 1 { "dir" } else { "file" }
+                                            )
+                                        })
+                                        .collect();
                                     warn!(
                                         "清理前临时目录快照: task_id={}, temp_dir={}, total_items={}, first_20={:?}",
                                         task_id, td, total, items
@@ -1513,12 +1589,29 @@ impl TransferManager {
                                 }
                             }
 
-                            let configured_root = app_config.read().await.share_direct_download.temp_dir.clone();
-                            info!("转存失败，清理临时目录: task_id={}, temp_dir={}", task_id, td);
-                            let cleanup = Self::cleanup_temp_dir_internal(&client, td, &configured_root).await;
-                            info!("转存失败清理结果: task_id={}, status={:?}", task_id, cleanup.status);
+                            let configured_root = app_config
+                                .read()
+                                .await
+                                .share_direct_download
+                                .temp_dir
+                                .clone();
+                            info!(
+                                "转存失败，清理临时目录: task_id={}, temp_dir={}",
+                                task_id, td
+                            );
+                            let cleanup =
+                                Self::cleanup_temp_dir_internal(&client, td, &configured_root)
+                                    .await;
+                            info!(
+                                "转存失败清理结果: task_id={}, status={:?}",
+                                task_id, cleanup.status
+                            );
                             if let Some(ref pm_arc) = persistence_manager {
-                                if let Err(e) = pm_arc.lock().await.update_cleanup_status(task_id, cleanup.status) {
+                                if let Err(e) = pm_arc
+                                    .lock()
+                                    .await
+                                    .update_cleanup_status(task_id, cleanup.status)
+                                {
                                     warn!("持久化清理状态失败: task_id={}, error={}", task_id, e);
                                 }
                             }
@@ -1541,7 +1634,7 @@ impl TransferManager {
                     let mut app_cfg = app_config.write().await;
                     app_cfg.transfer.recent_save_fs_id = Some(save_fs_id);
                     app_cfg.transfer.recent_save_path = Some(save_path.clone());
-                    if let Err(e) = app_cfg.save_to_file("config/app.toml").await {
+                    if let Err(e) = app_cfg.save_to_file(crate::config::APP_CONFIG_PATH).await {
                         warn!("保存转存配置失败: {}", e);
                     }
                 }
@@ -1553,7 +1646,11 @@ impl TransferManager {
                     // 超限下钻展开过目录时，分母已经从「选中项数」长到「实际单元数」；
                     // 再兜一层 max，保证任何情况下分子都不会超过分母
                     t.total_count = effective_total_units.max(t.transferred_count);
-                    (t.auto_download, t.file_list.clone(), t.is_share_direct_download)
+                    (
+                        t.auto_download,
+                        t.file_list.clone(),
+                        t.is_share_direct_download,
+                    )
                 };
 
                 if auto_download {
@@ -1574,7 +1671,7 @@ impl TransferManager {
                         is_share_direct_download,
                         batch_groups_info,
                     )
-                        .await?;
+                    .await?;
 
                     // 自动下载场景：转存已完成，直接落盘为完成状态
                     if let Some(ref pm_arc) = persistence_manager {
@@ -1587,10 +1684,7 @@ impl TransferManager {
                         if let Err(e) = pm.on_task_completed(task_id) {
                             warn!("标记转存任务完成失败: {}", e);
                         } else {
-                            info!(
-                                "转存任务已标记完成（自动下载已启动）: task_id={}",
-                                task_id
-                            );
+                            info!("转存任务已标记完成（自动下载已启动）: task_id={}", task_id);
                         }
                     }
 
@@ -1642,7 +1736,10 @@ impl TransferManager {
                         if let Err(e) = pm.on_task_completed(task_id) {
                             warn!("标记转存任务完成失败: {}", e);
                         } else {
-                            info!("转存任务已标记完成，等待归档任务写入 history: task_id={}", task_id);
+                            info!(
+                                "转存任务已标记完成，等待归档任务写入 history: task_id={}",
+                                task_id
+                            );
                         }
                     }
 
@@ -1675,7 +1772,8 @@ impl TransferManager {
                         // 使用 recover_from_conflict 返回的完整文件信息构造 TransferResult
                         info!(
                             "分享直下 -30 恢复成功，继续下载流程: task_id={}, recovered={}",
-                            task_id, recovered_items.len()
+                            task_id,
+                            recovered_items.len()
                         );
 
                         // 更新任务状态为已转存（不标记失败）
@@ -1749,7 +1847,7 @@ impl TransferManager {
                                 is_share_direct_download,
                                 None,
                             )
-                                .await?;
+                            .await?;
 
                             // 持久化完成状态
                             if let Some(ref pm_arc) = persistence_manager {
@@ -1879,13 +1977,33 @@ impl TransferManager {
                                 t.temp_dir.clone()
                             };
                             if let Some(ref td) = temp_dir {
-                                let configured_root = app_config.read().await.share_direct_download.temp_dir.clone();
-                                info!("转存请求异常，清理临时目录: task_id={}, temp_dir={}", task_id, td);
-                                let cleanup = Self::cleanup_temp_dir_internal(&client, td, &configured_root).await;
-                                info!("转存异常清理结果: task_id={}, status={:?}", task_id, cleanup.status);
+                                let configured_root = app_config
+                                    .read()
+                                    .await
+                                    .share_direct_download
+                                    .temp_dir
+                                    .clone();
+                                info!(
+                                    "转存请求异常，清理临时目录: task_id={}, temp_dir={}",
+                                    task_id, td
+                                );
+                                let cleanup =
+                                    Self::cleanup_temp_dir_internal(&client, td, &configured_root)
+                                        .await;
+                                info!(
+                                    "转存异常清理结果: task_id={}, status={:?}",
+                                    task_id, cleanup.status
+                                );
                                 if let Some(ref pm_arc) = persistence_manager {
-                                    if let Err(e) = pm_arc.lock().await.update_cleanup_status(task_id, cleanup.status) {
-                                        warn!("持久化清理状态失败: task_id={}, error={}", task_id, e);
+                                    if let Err(e) = pm_arc
+                                        .lock()
+                                        .await
+                                        .update_cleanup_status(task_id, cleanup.status)
+                                    {
+                                        warn!(
+                                            "持久化清理状态失败: task_id={}, error={}",
+                                            task_id, e
+                                        );
                                     }
                                 }
                             }
@@ -1993,12 +2111,12 @@ impl TransferManager {
         //   2. (name, is_dir) → Vec<SharedFileInfo>：名称 + 类型匹配（多值，支持同名文件消歧）
         // 注意：transferred_fs_ids 是百度返回的转存后新 fs_id（to_fs_id），
         // 与 file_list 中的原始分享 fs_id 不同，无法直接用 fs_id 匹配。
-        let file_info_by_path: std::collections::HashMap<&str, &SharedFileInfo> = file_list
-            .iter()
-            .map(|f| (f.path.as_str(), f))
-            .collect();
-        let mut file_info_by_name_dir: std::collections::HashMap<(&str, bool), Vec<&SharedFileInfo>> =
-            std::collections::HashMap::new();
+        let file_info_by_path: std::collections::HashMap<&str, &SharedFileInfo> =
+            file_list.iter().map(|f| (f.path.as_str(), f)).collect();
+        let mut file_info_by_name_dir: std::collections::HashMap<
+            (&str, bool),
+            Vec<&SharedFileInfo>,
+        > = std::collections::HashMap::new();
         for f in &file_list {
             file_info_by_name_dir
                 .entry((f.name.as_str(), f.is_dir))
@@ -2012,14 +2130,19 @@ impl TransferManager {
         for (idx, transferred_path) in transfer_result.transferred_paths.iter().enumerate() {
             let transferred_fs_id = transfer_result.transferred_fs_ids.get(idx).copied();
             let from_path = transfer_result.from_paths.get(idx);
-            let from_filename = from_path
-                .map(|p| p.rsplit('/').next().unwrap_or(p).to_string());
-            let to_filename = transferred_path.rsplit('/').next().unwrap_or(transferred_path);
+            let from_filename = from_path.map(|p| p.rsplit('/').next().unwrap_or(p).to_string());
+            let to_filename = transferred_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(transferred_path);
 
             // transferred_path 相对于 save_path 的父目录（用于同名消歧）
             let transferred_relative_parent = if transferred_path.starts_with(save_prefix) {
                 let relative = transferred_path[save_prefix.len()..].trim_start_matches('/');
-                Path::new(relative).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()
+                Path::new(relative)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default()
             } else {
                 String::new()
             };
@@ -2033,12 +2156,18 @@ impl TransferManager {
                 .or_else(|| {
                     let name = from_filename.as_deref().unwrap_or(to_filename);
                     Self::disambiguate_by_parent(
-                        &file_info_by_name_dir, name, &transferred_relative_parent, &share_root,
+                        &file_info_by_name_dir,
+                        name,
+                        &transferred_relative_parent,
+                        &share_root,
                     )
                 })
                 .or_else(|| {
                     Self::disambiguate_by_parent(
-                        &file_info_by_name_dir, to_filename, &transferred_relative_parent, &share_root,
+                        &file_info_by_name_dir,
+                        to_filename,
+                        &transferred_relative_parent,
+                        &share_root,
                     )
                 });
 
@@ -2059,8 +2188,10 @@ impl TransferManager {
             };
 
             if let Some(file_info) = file_info {
-                info!("匹配文件信息: idx={}, name={}, is_dir={}, transferred_fs_id={:?}",
-                    idx, file_info.name, file_info.is_dir, transferred_fs_id);
+                info!(
+                    "匹配文件信息: idx={}, name={}, is_dir={}, transferred_fs_id={:?}",
+                    idx, file_info.name, file_info.is_dir, transferred_fs_id
+                );
                 if file_info.is_dir {
                     // 文件夹：记录路径和本地目录
                     download_folders.push((transferred_path.clone(), local_dir));
@@ -2077,10 +2208,18 @@ impl TransferManager {
                 }
             } else {
                 // 无法匹配到文件信息（可能是同名碰撞或分页未拉全）
-                warn!("无法匹配文件信息: idx={}, path={}, from={:?}, to_filename={}",
-                    idx, transferred_path, from_filename, to_filename);
+                warn!(
+                    "无法匹配文件信息: idx={}, path={}, from={:?}, to_filename={}",
+                    idx, transferred_path, from_filename, to_filename
+                );
                 let fs_id = transferred_fs_id.unwrap_or(0);
-                download_files.push((fs_id, transferred_path.clone(), to_filename.to_string(), 0, local_dir));
+                download_files.push((
+                    fs_id,
+                    transferred_path.clone(),
+                    to_filename.to_string(),
+                    0,
+                    local_dir,
+                ));
             }
         }
 
@@ -2099,13 +2238,12 @@ impl TransferManager {
         let mut download_task_ids = Vec::new();
         let mut ensured_local_dirs: HashSet<PathBuf> = HashSet::new();
         let mut start_join_set = tokio::task::JoinSet::new();
-        let start_task_concurrency_limit = std::env::var(
-            "BAIDUPCS_AUTO_DOWNLOAD_START_CONCURRENCY",
-        )
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(128);
+        let start_task_concurrency_limit =
+            std::env::var("BAIDUPCS_AUTO_DOWNLOAD_START_CONCURRENCY")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(128);
         for (fs_id, remote_path, filename, size, local_dir) in download_files {
             // 确保本地下载目录存在（分批模式下可能是按原始结构还原出的父目录）
             if ensured_local_dirs.insert(local_dir.clone()) && !local_dir.exists() {
@@ -2126,7 +2264,7 @@ impl TransferManager {
                     None,
                     transfer_owner_uid,
                 )
-                    .await
+                .await
             } else {
                 dm.create_task_with_dir_and_owner(
                     fs_id,
@@ -2137,7 +2275,7 @@ impl TransferManager {
                     None,
                     transfer_owner_uid,
                 )
-                    .await
+                .await
             };
             match create_result {
                 Ok(download_task_id) => {
@@ -2151,13 +2289,19 @@ impl TransferManager {
                     }
                     // 🔥 设置下载任务关联的转存任务 ID（内存中）
                     // 注意：持久化会在 start_task -> register_download_task 时自动从内存任务中获取
-                    if let Err(e) = dm.set_task_transfer_id(&download_task_id, task_id.to_string()).await {
+                    if let Err(e) = dm
+                        .set_task_transfer_id(&download_task_id, task_id.to_string())
+                        .await
+                    {
                         warn!("设置下载任务关联转存任务(内存)失败: {}", e);
                     }
 
                     // 🔥 如果是分享直下任务，标记下载任务
                     if is_share_direct_download {
-                        if let Err(e) = dm.set_task_share_direct_download(&download_task_id, true).await {
+                        if let Err(e) = dm
+                            .set_task_share_direct_download(&download_task_id, true)
+                            .await
+                        {
                             warn!("设置下载任务为分享直下任务失败: {}", e);
                         }
                     }
@@ -2249,7 +2393,8 @@ impl TransferManager {
                             folder_download_ids.push(folder_id.clone());
 
                             // 🔥 设置文件夹关联的转存任务 ID
-                            fdm.set_folder_transfer_id(&folder_id, task_id.to_string()).await;
+                            fdm.set_folder_transfer_id(&folder_id, task_id.to_string())
+                                .await;
                         }
                         Err(e) => {
                             warn!("创建文件夹下载任务失败: {}, error={}", folder_path, e);
@@ -2283,10 +2428,18 @@ impl TransferManager {
                 };
                 if auto_cleanup {
                     if let Some(ref temp_dir) = temp_dir {
-                        info!("无下载任务，清理临时目录: task_id={}, temp_dir={}", task_id, temp_dir);
+                        info!(
+                            "无下载任务，清理临时目录: task_id={}, temp_dir={}",
+                            task_id, temp_dir
+                        );
                         let client = _client.read().unwrap().clone();
-                        let cleanup = Self::cleanup_temp_dir_internal(&client, temp_dir, &configured_root).await;
-                        info!("无下载任务清理结果: task_id={}, status={:?}", task_id, cleanup.status);
+                        let cleanup =
+                            Self::cleanup_temp_dir_internal(&client, temp_dir, &configured_root)
+                                .await;
+                        info!(
+                            "无下载任务清理结果: task_id={}, status={:?}",
+                            task_id, cleanup.status
+                        );
                         cleanup_status = Some(cleanup.status);
                     }
                 }
@@ -2457,9 +2610,9 @@ impl TransferManager {
                 };
                 let is_share_sync_internal_download = is_internal
                     && backup_config_id
-                    .as_deref()
-                    .map(|id| id.starts_with("share-sync:"))
-                    .unwrap_or(false);
+                        .as_deref()
+                        .map(|id| id.starts_with("share-sync:"))
+                        .unwrap_or(false);
 
                 // 非下载中状态，停止监听
                 if status != TransferStatus::Downloading {
@@ -2479,7 +2632,7 @@ impl TransferManager {
                         &folder_download_manager,
                         &download_task_ids,
                     )
-                        .await;
+                    .await;
                     match stall_last_progress_at {
                         None => {
                             // 首次进入下载：初始化基准，不判超时
@@ -2517,7 +2670,7 @@ impl TransferManager {
                                     &folder_download_manager,
                                     &download_task_ids,
                                 )
-                                    .await;
+                                .await;
 
                                 let old_status;
                                 {
@@ -2526,7 +2679,8 @@ impl TransferManager {
                                     t.status = TransferStatus::DownloadFailed;
                                     // 中性文案：只陈述现象 + 下一步，不猜测原因(会员/带宽等)
                                     t.error = Some(
-                                        "下载长时间无进展，已判定为停滞并停止；可稍后重试".to_string(),
+                                        "下载长时间无进展，已判定为停滞并停止；可稍后重试"
+                                            .to_string(),
                                     );
                                     t.touch();
                                 }
@@ -2538,7 +2692,10 @@ impl TransferManager {
                                         .await
                                         .update_transfer_status(&task_id, "download_failed")
                                     {
-                                        warn!("持久化停滞失败状态失败: task_id={}, error={}", task_id, e);
+                                        warn!(
+                                            "持久化停滞失败状态失败: task_id={}, error={}",
+                                            task_id, e
+                                        );
                                     }
                                 }
 
@@ -2567,11 +2724,26 @@ impl TransferManager {
                                     if cleanup_on_failure {
                                         if let Some(ref temp_dir) = temp_dir {
                                             info!("下载停滞，触发临时目录清理: task_id={}, temp_dir={}", task_id, temp_dir);
-                                            let cleanup = Self::cleanup_temp_dir_internal(&client, temp_dir, &configured_root).await;
-                                            info!("下载停滞清理结果: task_id={}, status={:?}", task_id, cleanup.status);
+                                            let cleanup = Self::cleanup_temp_dir_internal(
+                                                &client,
+                                                temp_dir,
+                                                &configured_root,
+                                            )
+                                            .await;
+                                            info!(
+                                                "下载停滞清理结果: task_id={}, status={:?}",
+                                                task_id, cleanup.status
+                                            );
                                             if let Some(ref pm_arc) = persistence_manager {
-                                                if let Err(e) = pm_arc.lock().await.update_cleanup_status(&task_id, cleanup.status) {
-                                                    warn!("持久化清理状态失败: task_id={}, error={}", task_id, e);
+                                                if let Err(e) = pm_arc
+                                                    .lock()
+                                                    .await
+                                                    .update_cleanup_status(&task_id, cleanup.status)
+                                                {
+                                                    warn!(
+                                                        "持久化清理状态失败: task_id={}, error={}",
+                                                        task_id, e
+                                                    );
                                                 }
                                             }
                                         }
@@ -2586,14 +2758,14 @@ impl TransferManager {
 
                 if is_share_sync_internal_download
                     && share_sync_download_failure_retry_attempts
-                    < share_sync_download_failure_retry_max
+                        < share_sync_download_failure_retry_max
                 {
                     let restarted = Self::restart_failed_downloads_once(
                         &download_manager,
                         &folder_download_manager,
                         &download_task_ids,
                     )
-                        .await;
+                    .await;
                     if restarted > 0 {
                         share_sync_download_failure_retry_attempts += 1;
                         warn!(
@@ -2608,8 +2780,12 @@ impl TransferManager {
                 }
 
                 // 检查所有关联下载任务的状态
-                let final_status =
-                    Self::aggregate_download_status(&download_manager, &folder_download_manager, &download_task_ids).await;
+                let final_status = Self::aggregate_download_status(
+                    &download_manager,
+                    &folder_download_manager,
+                    &download_task_ids,
+                )
+                .await;
 
                 if let Some(new_status) = final_status {
                     info!(
@@ -2644,7 +2820,11 @@ impl TransferManager {
 
                                     // 🔥 持久化 Cleaning 状态
                                     if let Some(ref pm_arc) = persistence_manager {
-                                        if let Err(e) = pm_arc.lock().await.update_transfer_status(&task_id, "cleaning") {
+                                        if let Err(e) = pm_arc
+                                            .lock()
+                                            .await
+                                            .update_transfer_status(&task_id, "cleaning")
+                                        {
                                             warn!("持久化 Cleaning 状态失败: {}", e);
                                         }
                                     }
@@ -2665,9 +2845,20 @@ impl TransferManager {
 
                                     // 执行清理
                                     let cleanup_status = if let Some(ref temp_dir) = temp_dir {
-                                        info!("下载完成，开始清理临时目录: task_id={}, temp_dir={}", task_id, temp_dir);
-                                        let cleanup = Self::cleanup_temp_dir_internal(&client, temp_dir, &configured_root).await;
-                                        info!("下载完成清理结果: task_id={}, status={:?}", task_id, cleanup.status);
+                                        info!(
+                                            "下载完成，开始清理临时目录: task_id={}, temp_dir={}",
+                                            task_id, temp_dir
+                                        );
+                                        let cleanup = Self::cleanup_temp_dir_internal(
+                                            &client,
+                                            temp_dir,
+                                            &configured_root,
+                                        )
+                                        .await;
+                                        info!(
+                                            "下载完成清理结果: task_id={}, status={:?}",
+                                            task_id, cleanup.status
+                                        );
                                         Some(cleanup.status)
                                     } else {
                                         None
@@ -2687,10 +2878,15 @@ impl TransferManager {
                                         // 持久化清理状态
                                         if let Some(cs) = cleanup_status {
                                             if let Err(e) = pm.update_cleanup_status(&task_id, cs) {
-                                                warn!("持久化清理状态失败: task_id={}, error={}", task_id, e);
+                                                warn!(
+                                                    "持久化清理状态失败: task_id={}, error={}",
+                                                    task_id, e
+                                                );
                                             }
                                         }
-                                        if let Err(e) = pm.update_transfer_status(&task_id, "completed") {
+                                        if let Err(e) =
+                                            pm.update_transfer_status(&task_id, "completed")
+                                        {
                                             warn!("持久化 Completed 状态失败: {}", e);
                                         }
                                         if let Err(e) = pm.on_task_completed(&task_id) {
@@ -2711,7 +2907,6 @@ impl TransferManager {
                                             None,
                                         );
                                     }
-
                                 } else {
                                     // 不自动清理，直接标记为完成
                                     let old_status;
@@ -2724,7 +2919,9 @@ impl TransferManager {
                                     // 🔥 持久化 Completed 状态并标记任务完成
                                     if let Some(ref pm_arc) = persistence_manager {
                                         let pm = pm_arc.lock().await;
-                                        if let Err(e) = pm.update_transfer_status(&task_id, "completed") {
+                                        if let Err(e) =
+                                            pm.update_transfer_status(&task_id, "completed")
+                                        {
                                             warn!("持久化 Completed 状态失败: {}", e);
                                         }
                                         if let Err(e) = pm.on_task_completed(&task_id) {
@@ -2757,8 +2954,14 @@ impl TransferManager {
                                         if download_task_id.starts_with("folder:") {
                                             continue;
                                         }
-                                        if let Err(e) = dm.remove_share_direct_download_task(download_task_id).await {
-                                            warn!("移除分享直下下载任务失败: {}, error={}", download_task_id, e);
+                                        if let Err(e) = dm
+                                            .remove_share_direct_download_task(download_task_id)
+                                            .await
+                                        {
+                                            warn!(
+                                                "移除分享直下下载任务失败: {}, error={}",
+                                                download_task_id, e
+                                            );
                                         }
                                     }
                                 }
@@ -2779,7 +2982,11 @@ impl TransferManager {
 
                                 // 🔥 持久化 DownloadFailed 状态
                                 if let Some(ref pm_arc) = persistence_manager {
-                                    if let Err(e) = pm_arc.lock().await.update_transfer_status(&task_id, "download_failed") {
+                                    if let Err(e) = pm_arc
+                                        .lock()
+                                        .await
+                                        .update_transfer_status(&task_id, "download_failed")
+                                    {
                                         warn!("持久化 DownloadFailed 状态失败: {}", e);
                                     }
                                 }
@@ -2800,12 +3007,30 @@ impl TransferManager {
                                 // 失败时清理临时目录
                                 if cleanup_on_failure {
                                     if let Some(ref temp_dir) = temp_dir {
-                                        info!("下载失败，触发临时目录清理: task_id={}, temp_dir={}", task_id, temp_dir);
-                                        let cleanup = Self::cleanup_temp_dir_internal(&client, temp_dir, &configured_root).await;
-                                        info!("下载失败清理结果: task_id={}, status={:?}", task_id, cleanup.status);
+                                        info!(
+                                            "下载失败，触发临时目录清理: task_id={}, temp_dir={}",
+                                            task_id, temp_dir
+                                        );
+                                        let cleanup = Self::cleanup_temp_dir_internal(
+                                            &client,
+                                            temp_dir,
+                                            &configured_root,
+                                        )
+                                        .await;
+                                        info!(
+                                            "下载失败清理结果: task_id={}, status={:?}",
+                                            task_id, cleanup.status
+                                        );
                                         if let Some(ref pm_arc) = persistence_manager {
-                                            if let Err(e) = pm_arc.lock().await.update_cleanup_status(&task_id, cleanup.status) {
-                                                warn!("持久化清理状态失败: task_id={}, error={}", task_id, e);
+                                            if let Err(e) = pm_arc
+                                                .lock()
+                                                .await
+                                                .update_cleanup_status(&task_id, cleanup.status)
+                                            {
+                                                warn!(
+                                                    "持久化清理状态失败: task_id={}, error={}",
+                                                    task_id, e
+                                                );
                                             }
                                         }
                                     }
@@ -2850,11 +3075,26 @@ impl TransferManager {
                                     if cleanup_on_failure {
                                         if let Some(ref temp_dir) = temp_dir {
                                             info!("下载全部取消，清理临时目录: task_id={}, temp_dir={}", task_id, temp_dir);
-                                            let cleanup = Self::cleanup_temp_dir_internal(&client, temp_dir, &configured_root).await;
-                                            info!("下载取消清理结果: task_id={}, status={:?}", task_id, cleanup.status);
+                                            let cleanup = Self::cleanup_temp_dir_internal(
+                                                &client,
+                                                temp_dir,
+                                                &configured_root,
+                                            )
+                                            .await;
+                                            info!(
+                                                "下载取消清理结果: task_id={}, status={:?}",
+                                                task_id, cleanup.status
+                                            );
                                             if let Some(ref pm_arc) = persistence_manager {
-                                                if let Err(e) = pm_arc.lock().await.update_cleanup_status(&task_id, cleanup.status) {
-                                                    warn!("持久化清理状态失败: task_id={}, error={}", task_id, e);
+                                                if let Err(e) = pm_arc
+                                                    .lock()
+                                                    .await
+                                                    .update_cleanup_status(&task_id, cleanup.status)
+                                                {
+                                                    warn!(
+                                                        "持久化清理状态失败: task_id={}, error={}",
+                                                        task_id, e
+                                                    );
                                                 }
                                             }
                                         }
@@ -2981,7 +3221,10 @@ impl TransferManager {
             if let Some(folder_id) = task_id.strip_prefix("folder:") {
                 if let Some(ref fdm) = *fdm_lock {
                     if let Err(e) = fdm.cancel_folder(folder_id, false).await {
-                        warn!("停滞超时取消文件夹下载失败: folder_id={}, err={}", folder_id, e);
+                        warn!(
+                            "停滞超时取消文件夹下载失败: folder_id={}, err={}",
+                            folder_id, e
+                        );
                     }
                 }
             } else if let Some(ref dm) = *dm_lock {
@@ -3046,7 +3289,10 @@ impl TransferManager {
                 match download_manager.resume_task(task_id).await {
                     Ok(()) => {
                         restarted += 1;
-                        warn!("share-sync: failed download task resumed: task_id={}", task_id);
+                        warn!(
+                            "share-sync: failed download task resumed: task_id={}",
+                            task_id
+                        );
                     }
                     Err(e) => warn!(
                         "share-sync: resume failed download task failed: task_id={}, error={}",
@@ -3074,7 +3320,11 @@ impl TransferManager {
     ///
     /// # 安全性
     /// 确保不删除父目录 `{config.temp_dir}`，只删除任务特定的子目录
-    async fn cleanup_temp_dir_internal(client: &NetdiskClient, temp_dir: &str, configured_temp_root: &str) -> CleanupResult {
+    async fn cleanup_temp_dir_internal(
+        client: &NetdiskClient,
+        temp_dir: &str,
+        configured_temp_root: &str,
+    ) -> CleanupResult {
         const CLEANUP_TIMEOUT_SECS: u64 = 30;
 
         info!("开始清理临时目录: {}", temp_dir);
@@ -3097,8 +3347,9 @@ impl TransferManager {
         // 执行清理，带超时
         let cleanup_result = tokio::time::timeout(
             Duration::from_secs(CLEANUP_TIMEOUT_SECS),
-            client.delete_files(&[temp_dir.to_string()])
-        ).await;
+            client.delete_files(&[temp_dir.to_string()]),
+        )
+        .await;
 
         match cleanup_result {
             Ok(Ok(result)) => {
@@ -3168,7 +3419,10 @@ impl TransferManager {
             }
             Err(_) => {
                 // 超时，记录日志但不影响任务状态
-                warn!("临时目录清理超时（{}秒）: {}", CLEANUP_TIMEOUT_SECS, temp_dir);
+                warn!(
+                    "临时目录清理超时（{}秒）: {}",
+                    CLEANUP_TIMEOUT_SECS, temp_dir
+                );
                 CleanupResult {
                     success: false,
                     status: CleanupStatus::Failed,
@@ -3211,11 +3465,12 @@ impl TransferManager {
         // 多候选：计算每个候选的精确相对父目录，与 transferred_relative_parent 比较
         for c in &all_candidates {
             let original_parent = extract_parent_dir_str(&c.path);
-            let candidate_relative = if !share_root.is_empty() && original_parent.starts_with(share_root) {
-                original_parent[share_root.len()..].trim_start_matches('/')
-            } else {
-                original_parent.trim_start_matches('/')
-            };
+            let candidate_relative =
+                if !share_root.is_empty() && original_parent.starts_with(share_root) {
+                    original_parent[share_root.len()..].trim_start_matches('/')
+                } else {
+                    original_parent.trim_start_matches('/')
+                };
             if candidate_relative == transferred_relative_parent {
                 return Some(c);
             }
@@ -3224,7 +3479,9 @@ impl TransferManager {
         // 消歧失败，回退到第一个候选并警告
         warn!(
             "同名消歧失败: name={}, transferred_parent={}, candidates={}",
-            name, transferred_relative_parent, all_candidates.len()
+            name,
+            transferred_relative_parent,
+            all_candidates.len()
         );
         Some(all_candidates[0])
     }
@@ -3237,7 +3494,8 @@ impl TransferManager {
         if let Some(pos) = error_msg.find("task_errno=") {
             let after = &error_msg[pos + "task_errno=".len()..];
             // 提取数字部分（包括可能的负号）
-            let num_str: String = after.chars()
+            let num_str: String = after
+                .chars()
                 .take_while(|c| c.is_ascii_digit() || *c == '-')
                 .collect();
             num_str.parse::<i64>().ok()
@@ -3276,12 +3534,18 @@ impl TransferManager {
                     info!("分享直下模式检测到 -30 错误，尝试恢复");
                     match Self::recover_from_conflict(task, client).await {
                         Ok(recovered_items) => {
-                            info!("从 -30 冲突恢复成功，已获取 {} 个文件信息", recovered_items.len());
+                            info!(
+                                "从 -30 冲突恢复成功，已获取 {} 个文件信息",
+                                recovered_items.len()
+                            );
                             TransferErrorHandled::Recovered(recovered_items)
                         }
                         Err(e) => {
                             warn!("从 -30 冲突恢复失败: {}", e);
-                            TransferErrorHandled::Failed(format!("转存失败：目标目录已存在同名文件（恢复失败: {}）", e))
+                            TransferErrorHandled::Failed(format!(
+                                "转存失败：目标目录已存在同名文件（恢复失败: {}）",
+                                e
+                            ))
                         }
                     }
                 } else {
@@ -3353,9 +3617,7 @@ impl TransferManager {
             }
         } else if has_selected_fs_ids {
             // selected_files 为 None 但 selected_fs_ids 非空：file_list 不可靠
-            error!(
-                "selected_files 缺失但 selected_fs_ids 非空，file_list 可能不完整，拒绝恢复"
-            );
+            error!("selected_files 缺失但 selected_fs_ids 非空，file_list 可能不完整，拒绝恢复");
             return Err(anyhow::anyhow!(
                 "恢复所需的 selected_files 信息缺失（selected_fs_ids 模式下 file_list 不可靠）"
             ));
@@ -3389,10 +3651,7 @@ impl TransferManager {
             match client.get_file_list(&temp_dir, page, page_size).await {
                 Ok(list) => {
                     let batch_len = list.list.len();
-                    debug!(
-                        "拉取临时目录文件列表第 {} 页: {} 个项目",
-                        page, batch_len
-                    );
+                    debug!("拉取临时目录文件列表第 {} 页: {} 个项目", page, batch_len);
                     existing_files.extend(list.list);
                     if (batch_len as u32) < page_size {
                         break;
@@ -3443,10 +3702,7 @@ impl TransferManager {
                     }
                 }
             }
-            info!(
-                "含组子目录后共有 {} 个文件/文件夹",
-                existing_files.len()
-            );
+            info!("含组子目录后共有 {} 个文件/文件夹", existing_files.len());
         }
 
         // ========== 预计算 share_root（Phase 1/2 共用） ==========
@@ -3483,7 +3739,8 @@ impl TransferManager {
         }
 
         // consumed_paths 防止同一个远端文件被多次匹配
-        let mut consumed_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut consumed_paths: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut recovered_items = Vec::new();
 
         // ---------- Pass 1: 严格路径匹配（不做名称回退） ----------
@@ -3506,7 +3763,12 @@ impl TransferManager {
             if let Some((fs_id, path)) = path_to_item.get(expected_path.as_str()) {
                 if !consumed_paths.contains(*path) {
                     consumed_paths.insert(path.to_string());
-                    recovered_items.push((file.name.clone(), *fs_id, Some(path.to_string()), file.path.clone()));
+                    recovered_items.push((
+                        file.name.clone(),
+                        *fs_id,
+                        Some(path.to_string()),
+                        file.path.clone(),
+                    ));
                     matched = true;
                 }
             }
@@ -3518,7 +3780,12 @@ impl TransferManager {
                     if let Some((fs_id, path)) = path_to_item.get(group_expected.as_str()) {
                         if !consumed_paths.contains(*path) {
                             consumed_paths.insert(path.to_string());
-                            recovered_items.push((file.name.clone(), *fs_id, Some(path.to_string()), file.path.clone()));
+                            recovered_items.push((
+                                file.name.clone(),
+                                *fs_id,
+                                Some(path.to_string()),
+                                file.path.clone(),
+                            ));
                             matched = true;
                             break;
                         }
@@ -3532,10 +3799,15 @@ impl TransferManager {
         }
 
         let pass1_matched = recovered_items.len();
-        debug!("Phase1 Pass1 (路径匹配): matched={}, remaining={}", pass1_matched, pass1_remaining.len());
+        debug!(
+            "Phase1 Pass1 (路径匹配): matched={}, remaining={}",
+            pass1_matched,
+            pass1_remaining.len()
+        );
 
         // ---------- Pass 2: 名称回退（仅对 Pass 1 未命中的文件） ----------
-        let mut consumed_names: std::collections::HashSet<(String, bool)> = std::collections::HashSet::new();
+        let mut consumed_names: std::collections::HashSet<(String, bool)> =
+            std::collections::HashSet::new();
         let mut unmatched_files: Vec<&SharedFileInfo> = Vec::new();
 
         for file in &pass1_remaining {
@@ -3545,7 +3817,12 @@ impl TransferManager {
                     if !consumed_paths.contains(path) {
                         consumed_names.insert(key);
                         consumed_paths.insert(path.clone());
-                        recovered_items.push((file.name.clone(), *fs_id, Some(path.clone()), file.path.clone()));
+                        recovered_items.push((
+                            file.name.clone(),
+                            *fs_id,
+                            Some(path.clone()),
+                            file.path.clone(),
+                        ));
                         continue;
                     }
                 }
@@ -3576,7 +3853,8 @@ impl TransferManager {
             let mut still_failed = Vec::new();
 
             // 按父目录缓存扫描结果，避免同一目录重复请求
-            let mut dir_cache: HashMap<String, Vec<crate::netdisk::types::FileItem>> = HashMap::new();
+            let mut dir_cache: HashMap<String, Vec<crate::netdisk::types::FileItem>> =
+                HashMap::new();
 
             for file in &unmatched_files {
                 // 从 SharedFileInfo.path 推导在 temp_dir 中的相对路径
@@ -3588,9 +3866,7 @@ impl TransferManager {
                 };
 
                 let expected_path = format!("{}/{}", temp_base, relative);
-                let expected_parent = expected_path
-                    .rsplit_once('/')
-                    .map_or(temp_base, |(p, _)| p);
+                let expected_parent = expected_path.rsplit_once('/').map_or(temp_base, |(p, _)| p);
 
                 debug!(
                     "路径推导: name={}, share_path={}, expected={}, parent={}",
@@ -3639,29 +3915,48 @@ impl TransferManager {
                 }
 
                 // 在缓存中按 name+is_dir 查找（排除已消费路径）
-                let find_in_dir = |dir: &str, cache: &HashMap<String, Vec<crate::netdisk::types::FileItem>>, name: &str, is_dir: bool, consumed: &std::collections::HashSet<String>| -> Option<(Option<u64>, String)> {
-                    cache.get(dir).and_then(|items| {
-                        items.iter().find(|f| {
-                            f.server_filename == name && (f.isdir == 1) == is_dir && !consumed.contains(&f.path)
-                        }).map(|f| {
-                            let fs_id = if is_dir { None } else { Some(f.fs_id) };
-                            (fs_id, f.path.clone())
+                let find_in_dir =
+                    |dir: &str,
+                     cache: &HashMap<String, Vec<crate::netdisk::types::FileItem>>,
+                     name: &str,
+                     is_dir: bool,
+                     consumed: &std::collections::HashSet<String>|
+                     -> Option<(Option<u64>, String)> {
+                        cache.get(dir).and_then(|items| {
+                            items
+                                .iter()
+                                .find(|f| {
+                                    f.server_filename == name
+                                        && (f.isdir == 1) == is_dir
+                                        && !consumed.contains(&f.path)
+                                })
+                                .map(|f| {
+                                    let fs_id = if is_dir { None } else { Some(f.fs_id) };
+                                    (fs_id, f.path.clone())
+                                })
                         })
-                    })
-                };
+                    };
 
                 // 1. 尝试推导出的父目录（仅当不同于根目录时，根目录已在 Phase 1 扫过）
                 let mut found: Option<(Option<u64>, String)> = None;
                 if expected_parent != temp_base {
                     ensure_dir_cached!(expected_parent);
-                    found = find_in_dir(expected_parent, &dir_cache, &file.name, file.is_dir, &consumed_paths);
+                    found = find_in_dir(
+                        expected_parent,
+                        &dir_cache,
+                        &file.name,
+                        file.is_dir,
+                        &consumed_paths,
+                    );
                 }
 
                 // 2. 如果推导目录未命中，尝试每个 group_N 子目录（分批转存场景）
                 if found.is_none() && !group_dirs.is_empty() {
                     for gdir in &group_dirs {
                         ensure_dir_cached!(gdir.as_str());
-                        if let Some(result) = find_in_dir(gdir, &dir_cache, &file.name, file.is_dir, &consumed_paths) {
+                        if let Some(result) =
+                            find_in_dir(gdir, &dir_cache, &file.name, file.is_dir, &consumed_paths)
+                        {
                             found = Some(result);
                             break;
                         }
@@ -3671,7 +3966,12 @@ impl TransferManager {
                 if let Some((fs_id, ref path)) = found {
                     consumed_paths.insert(path.clone());
                     info!("路径推导匹配成功: name={}, path={}", file.name, path);
-                    recovered_items.push((file.name.clone(), fs_id, Some(path.clone()), file.path.clone()));
+                    recovered_items.push((
+                        file.name.clone(),
+                        fs_id,
+                        Some(path.clone()),
+                        file.path.clone(),
+                    ));
                 } else {
                     still_failed.push(format!(
                         "{}({}) [expected: {}]",
@@ -3688,29 +3988,30 @@ impl TransferManager {
                     still_failed.len(),
                     files_to_check.len()
                 );
-                warn!(
-                    "恢复失败: {}, 失败项: {:?}",
-                    error_msg, still_failed
-                );
+                warn!("恢复失败: {}, 失败项: {:?}", error_msg, still_failed);
                 return Err(anyhow::anyhow!(error_msg));
             }
         }
 
         // ========== 恢复成功摘要 ==========
         {
-            let top10: Vec<String> = recovered_items.iter().take(10).map(|(_name, _fs_id, path_opt, src)| {
-                format!(
-                    "{} -> {}",
-                    src,
-                    path_opt.as_deref().unwrap_or("N/A")
-                )
-            }).collect();
+            let top10: Vec<String> = recovered_items
+                .iter()
+                .take(10)
+                .map(|(_name, _fs_id, path_opt, src)| {
+                    format!("{} -> {}", src, path_opt.as_deref().unwrap_or("N/A"))
+                })
+                .collect();
             info!(
                 "恢复成功: task_id={}, recovered={}/{}, share_root={}, top10_mappings={:?}",
                 recovery_task_id,
                 recovered_items.len(),
                 files_to_check.len(),
-                if unmatched_files.is_empty() { "N/A (all phase1)" } else { "see above" },
+                if unmatched_files.is_empty() {
+                    "N/A (all phase1)"
+                } else {
+                    "see above"
+                },
                 top10
             );
         }
@@ -3748,7 +4049,9 @@ impl TransferManager {
                         match folder.status {
                             FolderStatus::Completed => completed_count += 1,
                             FolderStatus::Failed => failed_count += 1,
-                            FolderStatus::Downloading | FolderStatus::Scanning => downloading_count += 1,
+                            FolderStatus::Downloading | FolderStatus::Scanning => {
+                                downloading_count += 1
+                            }
                             FolderStatus::Paused => paused_count += 1,
                             FolderStatus::Cancelled => cancelled_count += 1,
                         }
@@ -3837,11 +4140,8 @@ impl TransferManager {
     /// `transferred_count` 是按「全部成功」伪造的。谁先进去谁赢的去重会让伪造副本
     /// 盖掉真实进度（实测部分成功的任务被显示成 7/7）。
     pub async fn get_live_tasks(&self) -> Vec<TransferTask> {
-        let task_arcs: Vec<Arc<RwLock<TransferTask>>> = self
-            .tasks
-            .iter()
-            .map(|e| e.value().task.clone())
-            .collect();
+        let task_arcs: Vec<Arc<RwLock<TransferTask>>> =
+            self.tasks.iter().map(|e| e.value().task.clone()).collect();
 
         let mut result = Vec::new();
         for task_arc in task_arcs {
@@ -3858,11 +4158,8 @@ impl TransferManager {
         let mut result = Vec::new();
 
         // 1) 收集内存中的任务 Arc（DashMap iter 不持久持锁，仅克隆 Arc）
-        let task_arcs: Vec<Arc<RwLock<TransferTask>>> = self
-            .tasks
-            .iter()
-            .map(|e| e.value().task.clone())
-            .collect();
+        let task_arcs: Vec<Arc<RwLock<TransferTask>>> =
+            self.tasks.iter().map(|e| e.value().task.clone()).collect();
 
         // 2) 跨 .await 顺序读取，确保每个任务都被收集（不跳过写锁占用的）
         for task_arc in task_arcs {
@@ -3888,9 +4185,9 @@ impl TransferManager {
             if let Some((history_tasks, _total)) = pm.get_history_tasks_by_type_and_status(
                 "transfer",
                 "completed",
-                false,  // don't exclude backup (transfer tasks are not backup tasks)
+                false, // don't exclude backup (transfer tasks are not backup tasks)
                 0,
-                500,   // 限制最多500条
+                500, // 限制最多500条
             ) {
                 for metadata in history_tasks {
                     // 排除已在当前任务中的（避免重复）
@@ -3981,7 +4278,10 @@ impl TransferManager {
             selected_fs_ids: None,
             selected_files: None,
             // 🔥 多账号：从 metadata 恢复 owner_uid，缺失为 Uid(0)（兜底）
-            owner_uid: metadata.owner_uid.map(crate::auth::Uid::new).unwrap_or_default(),
+            owner_uid: metadata
+                .owner_uid
+                .map(crate::auth::Uid::new)
+                .unwrap_or_default(),
             // 恢复分享根路径（老元数据缺该字段时为 None，调用方退化到启发式）
             share_root_path: metadata.share_root_path.clone(),
             // 内部标记不持久化于独立列：从 backup_config_id 前缀推断
@@ -4007,7 +4307,10 @@ impl TransferManager {
     ///
     /// `get_all_tasks` 为了「转存管理」列表隐藏内部任务会把它们过滤掉，分享同步收集
     /// 子任务进度 / 残留时必须走这里，否则转存段永远是空的。
-    pub async fn get_internal_tasks_by_backup_config(&self, backup_config_id: &str) -> Vec<TransferTask> {
+    pub async fn get_internal_tasks_by_backup_config(
+        &self,
+        backup_config_id: &str,
+    ) -> Vec<TransferTask> {
         let task_arcs: Vec<Arc<RwLock<TransferTask>>> =
             self.tasks.iter().map(|e| e.value().task.clone()).collect();
         let mut result = Vec::new();
@@ -4123,7 +4426,12 @@ impl TransferManager {
         // 🔥 cancel_task 各分支 TransferEvent 用 task.owner_uid
         let (current_status, is_share_direct_download, temp_dir, owner_uid_raw) = {
             let t = task.read().await;
-            (t.status.clone(), t.is_share_direct_download, t.temp_dir.clone(), t.owner_uid.raw())
+            (
+                t.status.clone(),
+                t.is_share_direct_download,
+                t.temp_dir.clone(),
+                t.owner_uid.raw(),
+            )
         };
 
         info!(
@@ -4156,7 +4464,8 @@ impl TransferManager {
                     new_status: "transfer_failed".to_string(),
 
                     owner_uid: Some(owner_uid_raw),
-                }).await;
+                })
+                .await;
 
                 info!("取消转存任务成功（CheckingShare）: {}", id);
                 Ok(())
@@ -4178,23 +4487,40 @@ impl TransferManager {
                     new_status: "transfer_failed".to_string(),
 
                     owner_uid: Some(owner_uid_raw),
-                }).await;
+                })
+                .await;
 
                 // 分享直下任务：清理临时目录
                 if is_share_direct_download {
                     if let Some(ref temp_dir) = temp_dir {
                         let (cleanup_on_failure, configured_root) = {
                             let cfg = self.app_config.read().await;
-                            (cfg.share_direct_download.cleanup_on_failure, cfg.share_direct_download.temp_dir.clone())
+                            (
+                                cfg.share_direct_download.cleanup_on_failure,
+                                cfg.share_direct_download.temp_dir.clone(),
+                            )
                         };
 
                         if cleanup_on_failure {
-                            info!("转存取消，触发临时目录清理: task_id={}, temp_dir={}", id, temp_dir);
+                            info!(
+                                "转存取消，触发临时目录清理: task_id={}, temp_dir={}",
+                                id, temp_dir
+                            );
                             let client_snap = self.client.read().unwrap().clone();
-                            let cleanup = Self::cleanup_temp_dir_internal(&client_snap, temp_dir, &configured_root).await;
-                            info!("转存取消清理结果: task_id={}, status={:?}", id, cleanup.status);
+                            let cleanup = Self::cleanup_temp_dir_internal(
+                                &client_snap,
+                                temp_dir,
+                                &configured_root,
+                            )
+                            .await;
+                            info!(
+                                "转存取消清理结果: task_id={}, status={:?}",
+                                id, cleanup.status
+                            );
                             if let Some(pm) = self.persistence_manager().await {
-                                if let Err(e) = pm.lock().await.update_cleanup_status(id, cleanup.status) {
+                                if let Err(e) =
+                                    pm.lock().await.update_cleanup_status(id, cleanup.status)
+                                {
                                     warn!("持久化清理状态失败: task_id={}, error={}", id, e);
                                 }
                             }
@@ -4236,23 +4562,40 @@ impl TransferManager {
                     new_status: "download_failed".to_string(),
 
                     owner_uid: Some(owner_uid_raw),
-                }).await;
+                })
+                .await;
 
                 // 分享直下任务：清理临时目录
                 if is_share_direct_download {
                     if let Some(ref temp_dir) = temp_dir {
                         let (cleanup_on_failure, configured_root) = {
                             let cfg = self.app_config.read().await;
-                            (cfg.share_direct_download.cleanup_on_failure, cfg.share_direct_download.temp_dir.clone())
+                            (
+                                cfg.share_direct_download.cleanup_on_failure,
+                                cfg.share_direct_download.temp_dir.clone(),
+                            )
                         };
 
                         if cleanup_on_failure {
-                            info!("下载取消，触发临时目录清理: task_id={}, temp_dir={}", id, temp_dir);
+                            info!(
+                                "下载取消，触发临时目录清理: task_id={}, temp_dir={}",
+                                id, temp_dir
+                            );
                             let client_snap = self.client.read().unwrap().clone();
-                            let cleanup = Self::cleanup_temp_dir_internal(&client_snap, temp_dir, &configured_root).await;
-                            info!("下载取消清理结果: task_id={}, status={:?}", id, cleanup.status);
+                            let cleanup = Self::cleanup_temp_dir_internal(
+                                &client_snap,
+                                temp_dir,
+                                &configured_root,
+                            )
+                            .await;
+                            info!(
+                                "下载取消清理结果: task_id={}, status={:?}",
+                                id, cleanup.status
+                            );
                             if let Some(pm) = self.persistence_manager().await {
-                                if let Err(e) = pm.lock().await.update_cleanup_status(id, cleanup.status) {
+                                if let Err(e) =
+                                    pm.lock().await.update_cleanup_status(id, cleanup.status)
+                                {
                                     warn!("持久化清理状态失败: task_id={}, error={}", id, e);
                                 }
                             }
@@ -4268,7 +4611,10 @@ impl TransferManager {
             _ => {
                 // 终止状态不需要取消
                 if current_status.is_terminal() {
-                    info!("任务已处于终止状态，无需取消: task_id={}, status={:?}", id, current_status);
+                    info!(
+                        "任务已处于终止状态，无需取消: task_id={}, status={:?}",
+                        id, current_status
+                    );
                     return Ok(());
                 }
 
@@ -4287,9 +4633,13 @@ impl TransferManager {
                     new_status: "transfer_failed".to_string(),
 
                     owner_uid: Some(owner_uid_raw),
-                }).await;
+                })
+                .await;
 
-                info!("取消转存任务成功: task_id={}, old_status={:?}", id, current_status);
+                info!(
+                    "取消转存任务成功: task_id={}, old_status={:?}",
+                    id, current_status
+                );
                 Ok(())
             }
         }
@@ -4332,7 +4682,7 @@ impl TransferManager {
 
             owner_uid: owner_uid_raw,
         })
-            .await;
+        .await;
 
         Ok(())
     }
@@ -4356,10 +4706,7 @@ impl TransferManager {
     /// `try_read` 直接跳过 → 该任务被漏删 → `force_delete_account` 后续移除 uid
     /// 映射 + client_pool，但漏掉的 transfer 还在共享 manager 内继续跑/残留 .meta。
     /// 强删路径必须确定性收集，这里改用 `read().await`（短暂等待写锁释放）。
-    pub async fn delete_tasks_for_owner(
-        &self,
-        uid: crate::auth::Uid,
-    ) -> (usize, usize) {
+    pub async fn delete_tasks_for_owner(&self, uid: crate::auth::Uid) -> (usize, usize) {
         // 1) 收集内存中归属该 uid 的 task ids（确定性 read，避免 try_read 漏删）
         //    DashMap iter 的元素先克隆 task Arc，然后按 .await 顺序取读锁。
         //    这避免 cross-await 持有 DashMap 锁（容易死锁）。
@@ -4387,10 +4734,7 @@ impl TransferManager {
         // 2) 逐个删除（复用 remove_task 的取消 + 持久化清理 + 事件流程）
         for id in target_ids {
             if let Err(e) = self.remove_task(&id).await {
-                warn!(
-                    "delete_tasks_for_owner: 删除任务 {} 失败: {}",
-                    id, e
-                );
+                warn!("delete_tasks_for_owner: 删除任务 {} 失败: {}", id, e);
             }
         }
 
@@ -4612,7 +4956,8 @@ impl TransferManager {
         }
         let client = self.client.read().unwrap().clone();
         for (idx, temp_dir) in temp_dirs.iter().enumerate() {
-            let cleanup = Self::cleanup_temp_dir_internal(&client, temp_dir, &configured_root).await;
+            let cleanup =
+                Self::cleanup_temp_dir_internal(&client, temp_dir, &configured_root).await;
             info!(
                 "丢弃转存任务，清理临时目录: temp_dir={}, status={:?}",
                 temp_dir, cleanup.status
@@ -4678,7 +5023,7 @@ impl TransferManager {
             false, // auto_download 稍后设置
             None,
         )
-            .with_owner_uid(resolved_owner_uid);
+        .with_owner_uid(resolved_owner_uid);
 
         // 恢复任务 ID（保持原有 ID）
         task.id = task_id.clone();
@@ -4788,19 +5133,37 @@ impl TransferManager {
                 let tasks = self.tasks.clone();
                 let ws_manager = self.ws_manager.read().await.clone();
                 let pm_for_cleanup = self.persistence_manager().await;
-                let configured_root = self.app_config.read().await.share_direct_download.temp_dir.clone();
+                let configured_root = self
+                    .app_config
+                    .read()
+                    .await
+                    .share_direct_download
+                    .temp_dir
+                    .clone();
                 let temp_dir = temp_dir.clone();
                 let task_id_clone = task_id.clone();
 
                 tokio::spawn(async move {
-                    info!("重试清理临时目录: task_id={}, temp_dir={}", task_id_clone, temp_dir);
+                    info!(
+                        "重试清理临时目录: task_id={}, temp_dir={}",
+                        task_id_clone, temp_dir
+                    );
                     let client_snap = client.read().unwrap().clone();
-                    let cleanup = Self::cleanup_temp_dir_internal(&client_snap, &temp_dir, &configured_root).await;
-                    info!("重试清理结果: task_id={}, status={:?}", task_id_clone, cleanup.status);
+                    let cleanup =
+                        Self::cleanup_temp_dir_internal(&client_snap, &temp_dir, &configured_root)
+                            .await;
+                    info!(
+                        "重试清理结果: task_id={}, status={:?}",
+                        task_id_clone, cleanup.status
+                    );
 
                     // 持久化清理状态
                     if let Some(ref pm_arc) = pm_for_cleanup {
-                        if let Err(e) = pm_arc.lock().await.update_cleanup_status(&task_id_clone, cleanup.status) {
+                        if let Err(e) = pm_arc
+                            .lock()
+                            .await
+                            .update_cleanup_status(&task_id_clone, cleanup.status)
+                        {
                             warn!("持久化清理状态失败: task_id={}, error={}", task_id_clone, e);
                         }
                     }
@@ -5110,8 +5473,7 @@ impl TransferManager {
             self.tasks.iter().map(|e| e.value().task.clone()).collect();
         for task_arc in task_arcs {
             let t = task_arc.read().await;
-            let finished =
-                temp_cleanup::is_finished_transfer_status(&format!("{:?}", t.status));
+            let finished = temp_cleanup::is_finished_transfer_status(&format!("{:?}", t.status));
             if !temp_cleanup::transfer_protects_temp_dir(finished, t.updated_at, now) {
                 continue;
             }
@@ -5133,7 +5495,7 @@ impl TransferManager {
                     temp_cleanup::protect_path(&mut protected, root, &f.remote_root);
                 }
             })
-                .await;
+            .await;
         }
 
         // c) 磁盘持久化记录
@@ -5152,8 +5514,8 @@ impl TransferManager {
                 .map_err(|e| format!("读取文件夹下载记录失败: {}", e))?;
             Ok::<_, String>((metas, folders))
         })
-            .await
-            .map_err(|e| format!("扫描持久化记录任务异常: {}", e))??;
+        .await
+        .map_err(|e| format!("扫描持久化记录任务异常: {}", e))??;
 
         for meta in metas {
             match meta.task_type {
@@ -5189,7 +5551,10 @@ impl TransferManager {
             }
         }
         for folder in folders {
-            if !matches!(folder.status, FolderStatus::Completed | FolderStatus::Cancelled) {
+            if !matches!(
+                folder.status,
+                FolderStatus::Completed | FolderStatus::Cancelled
+            ) {
                 temp_cleanup::protect_path(&mut protected, root, &folder.remote_root);
             }
         }
@@ -5253,7 +5618,10 @@ pub(crate) async fn list_all_dir_entries(
             }
         }
     }
-    Err(format!("目录条目过多（超过 {} 页），已中止: {}", MAX_PAGES, dir))
+    Err(format!(
+        "目录条目过多（超过 {} 页），已中止: {}",
+        MAX_PAGES, dir
+    ))
 }
 
 impl TransferManager {
@@ -5324,10 +5692,7 @@ async fn ensure_dirs_exist(client: &NetdiskClient, path: &str) -> Result<()> {
 ///
 /// - selected_fs_ids 为 None 或空数组 → 返回 file_list 中所有文件的 fs_id（向后兼容）
 /// - selected_fs_ids 非空 → 直接返回用户选择的 fs_id 列表（包括文件夹）
-pub fn build_fs_ids(
-    file_list: &[SharedFileInfo],
-    selected_fs_ids: &Option<Vec<u64>>,
-) -> Vec<u64> {
+pub fn build_fs_ids(file_list: &[SharedFileInfo], selected_fs_ids: &Option<Vec<u64>>) -> Vec<u64> {
     if let Some(ref selected) = selected_fs_ids {
         if selected.is_empty() {
             file_list.iter().map(|f| f.fs_id).collect()
@@ -5348,7 +5713,9 @@ fn extract_basename_str(path: &str) -> &str {
 
 /// 提取路径中的父目录部分
 fn extract_parent_dir_str(path: &str) -> &str {
-    path.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("/")
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("/")
 }
 
 /// 检测跨目录同名文件
@@ -5356,11 +5723,15 @@ fn extract_parent_dir_str(path: &str) -> &str {
 /// 返回存在跨目录同名的 basename 列表。
 /// 如果返回为空，表示没有跨目录同名文件，可以使用单次转存。
 fn detect_cross_dir_duplicates(files: &[SharedFileInfo]) -> Vec<String> {
-    let mut basename_to_parents: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    let mut basename_to_parents: HashMap<String, std::collections::HashSet<String>> =
+        HashMap::new();
     for file in files {
         let basename = extract_basename_str(&file.path).to_string();
         let parent = extract_parent_dir_str(&file.path).to_string();
-        basename_to_parents.entry(basename).or_default().insert(parent);
+        basename_to_parents
+            .entry(basename)
+            .or_default()
+            .insert(parent);
     }
     basename_to_parents
         .into_iter()
@@ -5383,7 +5754,10 @@ fn infer_share_root_fallback(files: &[SharedFileInfo]) -> String {
     if files.is_empty() {
         return String::new();
     }
-    let parents: Vec<&str> = files.iter().map(|f| extract_parent_dir_str(&f.path)).collect();
+    let parents: Vec<&str> = files
+        .iter()
+        .map(|f| extract_parent_dir_str(&f.path))
+        .collect();
     let first_segs: Vec<&str> = parents[0].split('/').collect();
     let mut common_len = first_segs.len();
     for p in &parents[1..] {
@@ -5441,7 +5815,12 @@ fn is_virtual_share_root(name: &str) -> bool {
 /// （不含尾部斜杠），否则返回 None。
 fn detect_virtual_share_root_prefix(files: &[SharedFileInfo]) -> Option<String> {
     let first = files.first()?;
-    let top = first.path.trim_start_matches('/').split('/').next().unwrap_or("");
+    let top = first
+        .path
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or("");
     if !is_virtual_share_root(top) {
         return None;
     }
@@ -5513,17 +5892,25 @@ fn derive_share_root(share_root_path: Option<&str>, files: &[SharedFileInfo]) ->
 ///
 /// 每个组的 key 是相对于 share_root 的父目录路径（如 "抖音"、"微信"），
 /// 同一父目录下的文件天然不会有同名冲突。
-fn group_files_by_parent_dir(files: &[SharedFileInfo], share_root: &str) -> Vec<(String, Vec<SharedFileInfo>)> {
+fn group_files_by_parent_dir(
+    files: &[SharedFileInfo],
+    share_root: &str,
+) -> Vec<(String, Vec<SharedFileInfo>)> {
     let mut groups: HashMap<String, Vec<SharedFileInfo>> = HashMap::new();
 
     for file in files {
         let parent = extract_parent_dir_str(&file.path);
         let relative_parent = if !share_root.is_empty() && parent.starts_with(share_root) {
-            parent[share_root.len()..].trim_start_matches('/').to_string()
+            parent[share_root.len()..]
+                .trim_start_matches('/')
+                .to_string()
         } else {
             parent.trim_start_matches('/').to_string()
         };
-        groups.entry(relative_parent).or_default().push(file.clone());
+        groups
+            .entry(relative_parent)
+            .or_default()
+            .push(file.clone());
     }
 
     let mut result: Vec<(String, Vec<SharedFileInfo>)> = groups.into_iter().collect();
@@ -5692,13 +6079,7 @@ impl ShareDirCtx<'_> {
                 };
                 match self
                     .client
-                    .list_share_files_in_dir_for(
-                        &dir_share_info,
-                        dir,
-                        page,
-                        PAGE_SIZE,
-                        self.randsk,
-                    )
+                    .list_share_files_in_dir_for(&dir_share_info, dir, page, PAGE_SIZE, self.randsk)
                     .await
                 {
                     Ok(b) => break b,
@@ -5790,7 +6171,7 @@ async fn split_over_limit_batch(
             internal_task_id,
             randsk,
         )
-            .await?;
+        .await?;
 
         // 临时错误（errno=4 超时等）退避重试同一组；拆小对它没用，重试才有用
         let mut transient_attempt: u32 = 0;
@@ -5818,7 +6199,7 @@ async fn split_over_limit_batch(
                 internal_task_id,
                 randsk,
             )
-                .await?;
+            .await?;
         }
 
         if result.success {
@@ -5970,7 +6351,10 @@ async fn cleanup_ondup_shells(
     let existing = match client.get_file_list(target_dir, 1, 1000).await {
         Ok(list) => list,
         Err(e) => {
-            warn!("清理空壳目录前列目录失败，跳过清理: dir={}, error={}", target_dir, e);
+            warn!(
+                "清理空壳目录前列目录失败，跳过清理: dir={}, error={}",
+                target_dir, e
+            );
             return;
         }
     };
@@ -5994,7 +6378,11 @@ async fn cleanup_ondup_shells(
     if shells.is_empty() {
         return;
     }
-    info!("清理超限失败留下的空壳目录: {} 个, {:?}", shells.len(), shells);
+    info!(
+        "清理超限失败留下的空壳目录: {} 个, {:?}",
+        shells.len(),
+        shells
+    );
     if let Err(e) = client.delete_files(&shells).await {
         warn!("清理空壳目录失败（不影响后续拆批）: {}", e);
     }
@@ -6028,11 +6416,16 @@ fn merge_batch_results(
             Ok(r) if r.success => {
                 success_count += 1;
                 if let Some(ref warn_msg) = r.error {
-                    partial_warnings.push(format!("batch_{} ({}): {}", batch_index, group_id, warn_msg));
+                    partial_warnings.push(format!(
+                        "batch_{} ({}): {}",
+                        batch_index, group_id, warn_msg
+                    ));
                 }
                 merged.transferred_paths.extend(r.transferred_paths.clone());
                 merged.from_paths.extend(r.from_paths);
-                merged.transferred_fs_ids.extend(r.transferred_fs_ids.clone());
+                merged
+                    .transferred_fs_ids
+                    .extend(r.transferred_fs_ids.clone());
 
                 batch_groups_info.push(BatchGroupInfo {
                     group_id: group_id.clone(),
@@ -6087,10 +6480,7 @@ fn merge_batch_results(
             .iter()
             .map(|(idx, gid, err)| format!("batch_{} ({}): {}", idx, gid, err))
             .collect();
-        merged.error = Some(format!(
-            "所有批次转存失败: {}",
-            all_errors.join("; ")
-        ));
+        merged.error = Some(format!("所有批次转存失败: {}", all_errors.join("; ")));
     }
 
     info!(
@@ -6211,30 +6601,21 @@ mod tests {
 
     #[test]
     fn test_detect_no_duplicates() {
-        let files = vec![
-            make_file("/a/1.jpg", 1),
-            make_file("/a/2.jpg", 2),
-        ];
+        let files = vec![make_file("/a/1.jpg", 1), make_file("/a/2.jpg", 2)];
         let dups = detect_cross_dir_duplicates(&files);
         assert!(dups.is_empty(), "同目录不同名，不应检测到跨目录同名");
     }
 
     #[test]
     fn test_detect_same_dir_same_name() {
-        let files = vec![
-            make_file("/a/1.jpg", 1),
-            make_file("/a/1.jpg", 2),
-        ];
+        let files = vec![make_file("/a/1.jpg", 1), make_file("/a/1.jpg", 2)];
         let dups = detect_cross_dir_duplicates(&files);
         assert!(dups.is_empty(), "同目录同名，不应检测到跨目录同名");
     }
 
     #[test]
     fn test_detect_cross_dir_duplicates_basic() {
-        let files = vec![
-            make_file("/抖音/1.jpg", 1),
-            make_file("/微信/1.jpg", 2),
-        ];
+        let files = vec![make_file("/抖音/1.jpg", 1), make_file("/微信/1.jpg", 2)];
         let dups = detect_cross_dir_duplicates(&files);
         assert!(dups.contains(&"1.jpg".to_string()));
     }
@@ -6558,7 +6939,10 @@ mod tests {
             strip_virtual_share_root("/sharelink-abc/x"),
             "/sharelink-abc/x"
         );
-        assert_eq!(strip_virtual_share_root("/sharelinkfoo/x"), "/sharelinkfoo/x");
+        assert_eq!(
+            strip_virtual_share_root("/sharelinkfoo/x"),
+            "/sharelinkfoo/x"
+        );
     }
 
     /// 路径就是虚拟根本身时剥成根，不产生空路径。
@@ -6690,10 +7074,7 @@ mod tests {
     /// 保持一批原样提交，交给惰性兜底——这正是不主动预扫的代价与前提。
     #[test]
     fn test_split_groups_cannot_judge_directories() {
-        let dirs = vec![
-            make_dir("/share/巨大目录", 1),
-            make_dir("/share/另一个", 2),
-        ];
+        let dirs = vec![make_dir("/share/巨大目录", 1), make_dir("/share/另一个", 2)];
 
         let batches = split_groups_by_file_limit(vec![("".to_string(), dirs)], 500);
 
@@ -6774,7 +7155,9 @@ mod tests {
     fn test_is_transient_transfer_error() {
         // 实测挂掉批次 2/3 的那条响应
         assert!(is_transient_transfer_error("请求超时，请稍后再试"));
-        assert!(is_transient_transfer_error("转存失败: connection reset by peer"));
+        assert!(is_transient_transfer_error(
+            "转存失败: connection reset by peer"
+        ));
         assert!(is_transient_transfer_error("operation timed out"));
         assert!(!is_transient_transfer_error("同名文件已存在: a.mp4"));
         assert!(!is_transient_transfer_error(""));
@@ -6800,7 +7183,9 @@ mod tests {
 
     #[test]
     fn test_is_quota_exceeded() {
-        assert!(is_quota_exceeded("网盘空间不足，无法转存（剩余空间不足，无法转存）"));
+        assert!(is_quota_exceeded(
+            "网盘空间不足，无法转存（剩余空间不足，无法转存）"
+        ));
         assert!(is_quota_exceeded("转存失败: errno=-32"));
         assert!(is_quota_exceeded("空间不足"));
         // 文件数超限不能被误判成空间不足——那是要继续拆的
@@ -6830,7 +7215,12 @@ mod tests {
             transferred_fs_ids: vec![1, 2],
             error: Some("网盘空间不足，无法转存".into()),
         };
-        let results = vec![(1usize, "13".to_string(), vec![make_file("/13/a", 1)], Ok(partial))];
+        let results = vec![(
+            1usize,
+            "13".to_string(),
+            vec![make_file("/13/a", 1)],
+            Ok(partial),
+        )];
 
         let (merged, _) = merge_batch_results(results, "/tmp");
 
@@ -6850,12 +7240,21 @@ mod tests {
             transferred_fs_ids: vec![1],
             error: None,
         };
-        let results = vec![(1usize, "13".to_string(), vec![make_file("/13/a", 1)], Ok(ok))];
+        let results = vec![(
+            1usize,
+            "13".to_string(),
+            vec![make_file("/13/a", 1)],
+            Ok(ok),
+        )];
 
         let (merged, _) = merge_batch_results(results, "/tmp");
 
         assert!(merged.success);
-        assert!(merged.error.is_none(), "干净成功不该带告警: {:?}", merged.error);
+        assert!(
+            merged.error.is_none(),
+            "干净成功不该带告警: {:?}",
+            merged.error
+        );
     }
 
     #[test]
@@ -6879,7 +7278,12 @@ mod tests {
         // 空间不足 → 早停，且不能被误判成「文件数超限」而去无限拆分
         for errno in [-10, -32, 31112] {
             let msg = describe_transfer_errno(errno, "空间不足，转存失败");
-            assert!(is_quota_exceeded(&msg), "errno={} 应判为空间不足: {}", errno, msg);
+            assert!(
+                is_quota_exceeded(&msg),
+                "errno={} 应判为空间不足: {}",
+                errno,
+                msg
+            );
             assert!(
                 !is_file_limit_exceeded(&msg),
                 "errno={} 不该判为文件数超限: {}",
@@ -7024,8 +7428,18 @@ mod tests {
             error: None,
         };
         let results = vec![
-            (1usize, "抖音".to_string(), vec![make_file("/share/抖音/photo.jpg", 1)], Ok(r1)),
-            (2usize, "微信".to_string(), vec![make_file("/share/微信/photo.jpg", 2)], Ok(r2)),
+            (
+                1usize,
+                "抖音".to_string(),
+                vec![make_file("/share/抖音/photo.jpg", 1)],
+                Ok(r1),
+            ),
+            (
+                2usize,
+                "微信".to_string(),
+                vec![make_file("/share/微信/photo.jpg", 2)],
+                Ok(r2),
+            ),
         ];
         let (merged, groups_info) = merge_batch_results(results, "/tmp");
         assert!(merged.success);
@@ -7046,8 +7460,18 @@ mod tests {
             error: None,
         };
         let results = vec![
-            (1usize, "抖音".to_string(), vec![make_file("/share/抖音/a.jpg", 1)], Ok(r1)),
-            (2usize, "微信".to_string(), vec![make_file("/share/微信/b.jpg", 2)], Err(anyhow::anyhow!("api error"))),
+            (
+                1usize,
+                "抖音".to_string(),
+                vec![make_file("/share/抖音/a.jpg", 1)],
+                Ok(r1),
+            ),
+            (
+                2usize,
+                "微信".to_string(),
+                vec![make_file("/share/微信/b.jpg", 2)],
+                Err(anyhow::anyhow!("api error")),
+            ),
         ];
         let (merged, groups_info) = merge_batch_results(results, "/tmp");
         assert!(merged.success, "至少一个批次成功应返回 success=true");
@@ -7059,8 +7483,18 @@ mod tests {
     #[test]
     fn test_merge_all_fail() {
         let results: Vec<(usize, String, Vec<SharedFileInfo>, Result<TransferResult>)> = vec![
-            (1usize, "抖音".to_string(), vec![], Err(anyhow::anyhow!("fail 1"))),
-            (2usize, "微信".to_string(), vec![], Err(anyhow::anyhow!("fail 2"))),
+            (
+                1usize,
+                "抖音".to_string(),
+                vec![],
+                Err(anyhow::anyhow!("fail 1")),
+            ),
+            (
+                2usize,
+                "微信".to_string(),
+                vec![],
+                Err(anyhow::anyhow!("fail 2")),
+            ),
         ];
         let (merged, groups_info) = merge_batch_results(results, "/tmp");
         assert!(!merged.success, "所有批次失败应返回 success=false");
@@ -7077,9 +7511,7 @@ mod tests {
             transferred_fs_ids: vec![1],
             error: None,
         };
-        let results = vec![
-            (1usize, "".to_string(), vec![], Ok(r1)),
-        ];
+        let results = vec![(1usize, "".to_string(), vec![], Ok(r1))];
         let (merged, groups_info) = merge_batch_results(results, "/tmp");
         assert!(merged.success);
         assert!(merged.error.is_none());
@@ -7134,7 +7566,11 @@ mod tests {
             TransferStatus::DownloadFailed,
         ] {
             let task = share_direct_task(status.clone());
-            assert!(TransferManager::abandoned_temp_dir(&task).is_none(), "{:?}", status);
+            assert!(
+                TransferManager::abandoned_temp_dir(&task).is_none(),
+                "{:?}",
+                status
+            );
         }
 
         // 普通转存：save_path 是用户目录，绝不能删
@@ -7183,10 +7619,25 @@ mod tests {
     #[tokio::test]
     async fn test_get_internal_tasks_by_backup_config() {
         let tm = test_manager();
-        let a = insert_task(&tm, true, Some("share-sync:a"), TransferStatus::Transferring);
-        insert_task(&tm, true, Some("share-sync:b"), TransferStatus::Transferring);
+        let a = insert_task(
+            &tm,
+            true,
+            Some("share-sync:a"),
+            TransferStatus::Transferring,
+        );
+        insert_task(
+            &tm,
+            true,
+            Some("share-sync:b"),
+            TransferStatus::Transferring,
+        );
         // 非内部任务即使带同名归属也不算
-        insert_task(&tm, false, Some("share-sync:a"), TransferStatus::Transferring);
+        insert_task(
+            &tm,
+            false,
+            Some("share-sync:a"),
+            TransferStatus::Transferring,
+        );
 
         let got: Vec<String> = tm
             .get_internal_tasks_by_backup_config("share-sync:a")
