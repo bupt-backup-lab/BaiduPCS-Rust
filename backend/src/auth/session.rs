@@ -48,7 +48,7 @@ impl SessionManager {
         info!("📝 序列化JSON成功，大小: {} bytes", json.len());
 
         // 写入文件
-        fs::write(&self.session_file, &json)
+        crate::common::write_atomic(&self.session_file, json)
             .await
             .context("Failed to write session file")?;
         info!("✅ 文件写入成功: {}", self.session_file);

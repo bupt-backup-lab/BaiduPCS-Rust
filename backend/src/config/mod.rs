@@ -20,6 +20,9 @@ use crate::common::ProxyConfig;
 // 分片尺寸的两道上限常量与下载分片实现同源，避免两处各写一个 5MB / 10MB
 use crate::downloader::chunk::{MAX_RANGE_REQUEST_SIZE, SMALL_FILE_SINGLE_CHUNK_THRESHOLD};
 
+/// 主配置文件路径（相对工作目录）
+pub const APP_CONFIG_PATH: &str = "config/app.toml";
+
 /// 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -288,7 +291,7 @@ impl Default for ConflictStrategyConfig {
         Self {
             default_upload_strategy: crate::uploader::conflict::UploadConflictStrategy::SmartDedup,
             default_download_strategy:
-            crate::uploader::conflict::DownloadConflictStrategy::Overwrite,
+                crate::uploader::conflict::DownloadConflictStrategy::Overwrite,
         }
     }
 }
@@ -1448,22 +1451,28 @@ impl AppConfig {
         }
 
         // 4. 序列化并保存配置文件
+        self.write_to_file(path).await?;
+
+        Ok(validation_result)
+    }
+
+    /// 序列化并原子写入配置文件，不做业务校验
+    ///
+    /// 所有写 app.toml 的路径最终都经过这里：全局互斥 + 临时文件 rename，
+    /// 避免两个写入方交错、或写到一半被打断留下截断文件。
+    /// 仅在不应被下载目录等校验阻塞的场景直接调用（如 Web 认证开关）。
+    pub async fn write_to_file(&self, path: &str) -> Result<()> {
+        static WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
         let content = toml::to_string_pretty(self).context("Failed to serialize config")?;
 
-        // 确保父目录存在
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            fs::create_dir_all(parent)
-                .await
-                .context("Failed to create config directory")?;
-        }
-
-        fs::write(path, content)
+        let _guard = WRITE_LOCK.lock().await;
+        crate::common::write_atomic(path, content)
             .await
             .context("Failed to write config file")?;
 
         tracing::info!("✓ 配置已保存: {}", path);
-
-        Ok(validation_result)
+        Ok(())
     }
 
     /// 加载或创建默认配置
@@ -1650,7 +1659,7 @@ mod tests {
             "remember_netdisk_path = false
 account_quick_bar = true",
         )
-            .unwrap();
+        .unwrap();
         assert!(!saved.remember_netdisk_path);
         assert!(saved.account_quick_bar);
     }
@@ -1917,7 +1926,7 @@ account_quick_bar = true",
             "temp_dir = \"/.bpr_share_temp/\"
 ",
         )
-            .unwrap();
+        .unwrap();
         assert_eq!(config.orphan_sweep_interval_hours, 6);
     }
 
