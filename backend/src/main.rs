@@ -225,6 +225,36 @@ async fn init_web_auth_state(
     Ok(state)
 }
 
+/// 等待关闭信号：Ctrl+C（SIGINT），Unix 下还有 SIGTERM
+///
+/// 容器里程序是 PID 1，内核不会对 PID 1 执行 SIGTERM 的默认动作（终止）；
+/// 不显式处理的话 `docker stop` 发的 SIGTERM 会被忽略，10 秒后被 SIGKILL 强杀，
+/// 走不到下面的优雅关闭流程。
+async fn shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => "Ctrl+C",
+                    _ = sigterm.recv() => "SIGTERM",
+                }
+            }
+            Err(e) => {
+                tracing::warn!("注册 SIGTERM 处理失败，仅监听 Ctrl+C: {}", e);
+                let _ = tokio::signal::ctrl_c().await;
+                "Ctrl+C"
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl+C"
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 🔥 先尝试加载日志配置，失败时使用默认配置
@@ -790,8 +820,8 @@ async fn main() -> anyhow::Result<()> {
                 tracing::error!("服务器错误: {}", e);
             }
         }
-        _ = tokio::signal::ctrl_c() => {
-            info!("收到 Ctrl+C，开始优雅关闭...");
+        signal = shutdown_signal() => {
+            info!("收到 {}，开始优雅关闭...", signal);
         }
     }
 
