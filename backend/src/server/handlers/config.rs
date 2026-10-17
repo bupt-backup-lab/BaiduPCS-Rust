@@ -1,7 +1,7 @@
 // 配置管理 API
 
 use crate::config::{
-    AppConfig, DownloadConfig, PathValidationResult, VipRecommendedConfig, VipType,
+    AppConfig, DownloadConfig, PathValidationResult, VipRecommendedConfig, VipType, APP_CONFIG_PATH,
 };
 use crate::server::error::{ApiError, ApiResult};
 use axum::{extract::State, response::Json};
@@ -53,7 +53,7 @@ pub async fn get_recommended_config(
         VipType::Vip => "普通会员",
         VipType::Svip => "超级会员",
     }
-        .to_string();
+    .to_string();
 
     // 获取推荐配置
     let recommended = DownloadConfig::recommended_for_vip(vip_type);
@@ -92,18 +92,20 @@ pub async fn reset_to_recommended(
     let vip_type = VipType::from_u32(vip_type_value);
     drop(current_user);
 
-    // 应用推荐配置
-    let mut config = app_state.config.read().await.clone();
-    config.download.apply_recommended(vip_type);
+    // 应用推荐配置：持写锁完成「改 → 落盘 → 回写内存」，避免与其他保存交错丢更新
+    let config = {
+        let mut guard = app_state.config.write().await;
+        let mut config = guard.clone();
+        config.download.apply_recommended(vip_type);
 
-    // 保存到文件
-    config
-        .save_to_file("config/app.toml")
-        .await
-        .map_err(ApiError::Internal)?;
+        config
+            .save_to_file(APP_CONFIG_PATH)
+            .await
+            .map_err(ApiError::Internal)?;
 
-    // 更新内存中的配置
-    *app_state.config.write().await = config.clone();
+        *guard = config.clone();
+        config
+    };
 
     // 🔧 动态更新下载管理器配置
     //
@@ -188,7 +190,7 @@ pub async fn reset_to_recommended(
 /// 更新配置
 pub async fn update_config(
     State(app_state): State<crate::server::AppState>,
-    Json(new_config): Json<AppConfig>,
+    Json(mut new_config): Json<AppConfig>,
 ) -> ApiResult<Json<ApiResponse<ConfigUpdateResponse>>> {
     info!("更新应用配置");
 
@@ -245,21 +247,27 @@ pub async fn update_config(
         return Err(ApiError::BadRequest(format!("代理配置验证失败: {}", e)));
     }
 
-    // ⚠️ 时序关键：在覆盖配置之前读取旧代理配置，用于变更检测
-    let old_proxy = {
-        let old_config = app_state.config.read().await;
-        old_config.network.proxy.clone()
+    let (validation_result, proxy_changed) = {
+        let mut guard = app_state.config.write().await;
+
+        // ⚠️ 时序关键：在覆盖配置之前读取旧代理配置，用于变更检测
+        let proxy_changed = guard.network.proxy != new_config.network.proxy;
+
+        // Web 认证开关只能经 /web-auth/config 修改（需校验密码 / TOTP 已设置）。
+        // 设置页会把 GET /config 拿到的整份配置原样提交回来，这里一律以服务端
+        // 当前值为准，防止旧值或伪造值关闭认证（issue #177）
+        new_config.web_auth = guard.web_auth.clone();
+
+        // 保存到文件（包含完整的路径验证）
+        let validation_result = new_config
+            .save_to_file(APP_CONFIG_PATH)
+            .await
+            .map_err(ApiError::Internal)?;
+
+        // 更新内存中的配置
+        *guard = new_config.clone();
+        (validation_result, proxy_changed)
     };
-    let proxy_changed = old_proxy != new_config.network.proxy;
-
-    // 保存到文件（包含完整的路径验证）
-    let validation_result = new_config
-        .save_to_file("config/app.toml")
-        .await
-        .map_err(ApiError::Internal)?;
-
-    // 更新内存中的配置
-    *app_state.config.write().await = new_config.clone();
 
     // 🔧 动态更新下载/上传管理器配置
     //
@@ -635,8 +643,9 @@ pub async fn update_recent_dir(
         return Err(ApiError::BadRequest("路径必须是绝对路径".to_string()));
     }
 
-    // 获取当前配置
-    let mut config = app_state.config.read().await.clone();
+    // 获取当前配置（持写锁直到回写内存，避免与其他保存交错丢更新）
+    let mut guard = app_state.config.write().await;
+    let mut config = guard.clone();
 
     // 根据类型更新对应的最近目录
     match req.dir_type.as_str() {
@@ -658,12 +667,12 @@ pub async fn update_recent_dir(
 
     // 保存到文件
     config
-        .save_to_file("config/app.toml")
+        .save_to_file(APP_CONFIG_PATH)
         .await
         .map_err(ApiError::Internal)?;
 
     // 更新内存中的配置
-    *app_state.config.write().await = config;
+    *guard = config;
 
     Ok(Json(ApiResponse::success("最近目录已更新".to_string())))
 }
@@ -694,21 +703,25 @@ pub async fn set_default_download_dir(
         return Err(ApiError::BadRequest(format!("目录不存在: {}", req.path)));
     }
 
-    // 获取当前配置
-    let mut config = app_state.config.read().await.clone();
-    config.download.default_directory = Some(path.clone());
+    // 持写锁完成「改 → 落盘 → 回写内存」，避免与其他保存交错丢更新
+    let config = {
+        let mut guard = app_state.config.write().await;
+        let mut config = guard.clone();
+        config.download.default_directory = Some(path.clone());
 
-    // 同时更新 download_dir（主下载目录）
-    config.download.download_dir = path;
+        // 同时更新 download_dir（主下载目录）
+        config.download.download_dir = path;
 
-    // 保存到文件
-    config
-        .save_to_file("config/app.toml")
-        .await
-        .map_err(ApiError::Internal)?;
+        // 保存到文件
+        config
+            .save_to_file(APP_CONFIG_PATH)
+            .await
+            .map_err(ApiError::Internal)?;
 
-    // 更新内存中的配置
-    *app_state.config.write().await = config.clone();
+        // 更新内存中的配置
+        *guard = config.clone();
+        config
+    };
 
     // 同步更新下载管理器的下载目录
     //
@@ -754,15 +767,16 @@ pub async fn set_default_download_account(
         }
     }
 
-    let mut config = app_state.config.read().await.clone();
+    let mut guard = app_state.config.write().await;
+    let mut config = guard.clone();
     config.download.default_download_account_uid = req.uid;
 
     config
-        .save_to_file("config/app.toml")
+        .save_to_file(APP_CONFIG_PATH)
         .await
         .map_err(ApiError::Internal)?;
 
-    *app_state.config.write().await = config;
+    *guard = config;
 
     Ok(Json(ApiResponse::success("默认下载账号已设置".to_string())))
 }
@@ -835,7 +849,7 @@ pub async fn get_transfer_config(
 
             // 保存到文件
             write_config
-                .save_to_file("config/app.toml")
+                .save_to_file(APP_CONFIG_PATH)
                 .await
                 .map_err(ApiError::Internal)?;
 
@@ -877,28 +891,32 @@ pub async fn update_transfer_config(
         }
     }
 
-    // 获取当前配置
-    let mut config = app_state.config.read().await.clone();
+    // 持写锁完成「改 → 落盘 → 回写内存」，避免与其他保存交错丢更新
+    let config = {
+        let mut guard = app_state.config.write().await;
+        let mut config = guard.clone();
 
-    // 更新转存配置
-    if let Some(behavior) = req.default_behavior {
-        config.transfer.default_behavior = behavior;
-    }
-    if let Some(fs_id) = req.recent_save_fs_id {
-        config.transfer.recent_save_fs_id = Some(fs_id);
-    }
-    if let Some(path) = req.recent_save_path {
-        config.transfer.recent_save_path = Some(path);
-    }
+        // 更新转存配置
+        if let Some(behavior) = req.default_behavior {
+            config.transfer.default_behavior = behavior;
+        }
+        if let Some(fs_id) = req.recent_save_fs_id {
+            config.transfer.recent_save_fs_id = Some(fs_id);
+        }
+        if let Some(path) = req.recent_save_path {
+            config.transfer.recent_save_path = Some(path);
+        }
 
-    // 保存到文件
-    config
-        .save_to_file("config/app.toml")
-        .await
-        .map_err(ApiError::Internal)?;
+        // 保存到文件
+        config
+            .save_to_file(APP_CONFIG_PATH)
+            .await
+            .map_err(ApiError::Internal)?;
 
-    // 更新内存中的配置
-    *app_state.config.write().await = config.clone();
+        // 更新内存中的配置
+        *guard = config.clone();
+        config
+    };
 
     // 同步更新转存管理器的配置
     //

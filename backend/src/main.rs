@@ -91,7 +91,7 @@ fn detect_frontend_dir() -> PathBuf {
 /// 尝试从配置文件加载，失败时返回默认配置
 async fn load_log_config() -> LogConfig {
     // 尝试读取配置文件中的日志配置
-    let config_path = "config/app.toml";
+    let config_path = baidu_netdisk_rust::config::APP_CONFIG_PATH;
     if let Ok(content) = tokio::fs::read_to_string(config_path).await {
         if let Ok(config) = toml::from_str::<toml::Value>(&content) {
             if let Some(log_table) = config.get("log") {
@@ -175,8 +175,10 @@ async fn ensure_download_dir_accessible(download_dir: &std::path::Path) {
 /// 初始化 Web 认证状态
 ///
 /// 从配置和凭证文件加载认证状态，并根据认证模式启动清理任务。
+/// `app_config` 与 AppState 共享，认证开关变更时写回它再落盘。
 async fn init_web_auth_state(
     config: &baidu_netdisk_rust::config::WebAuthConfig,
+    app_config: Arc<tokio::sync::RwLock<baidu_netdisk_rust::config::AppConfig>>,
 ) -> Arc<WebAuthState> {
     use baidu_netdisk_rust::web_auth::create_auth_store;
 
@@ -195,7 +197,8 @@ async fn init_web_auth_state(
         credentials,
         None, // JWT 密钥自动生成
         auth_store,
-    );
+    )
+    .with_app_config(app_config, baidu_netdisk_rust::config::APP_CONFIG_PATH);
 
     let state = Arc::new(state);
 
@@ -280,7 +283,8 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.server.host, config.server.port);
 
     // 🔥 初始化 Web 认证状态
-    let web_auth_state = init_web_auth_state(&config.web_auth).await;
+    let web_auth_state =
+        init_web_auth_state(&config.web_auth, Arc::clone(&app_state.config)).await;
     info!("Web 认证状态初始化完成 (模式: {:?})", config.web_auth.mode);
 
     // 配置中间件层

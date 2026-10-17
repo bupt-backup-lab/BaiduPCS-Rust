@@ -280,13 +280,14 @@ pub async fn delete_account(
 
 /// 被删账号是「用其他账号下载」的默认账号时清掉该配置；账号已删除，失败只记日志
 async fn clear_default_download_account(state: &AppState, uid: Uid) {
-    let mut config = state.config.read().await.clone();
-    if config.download.default_download_account_uid != Some(uid.raw()) {
+    let mut guard = state.config.write().await;
+    if guard.download.default_download_account_uid != Some(uid.raw()) {
         return;
     }
+    let mut config = guard.clone();
     config.download.default_download_account_uid = None;
-    match config.save_to_file("config/app.toml").await {
-        Ok(_) => *state.config.write().await = config,
+    match config.save_to_file(crate::config::APP_CONFIG_PATH).await {
+        Ok(_) => *guard = config,
         Err(e) => warn!("清除默认下载账号失败: uid={}, error={:#}", uid.raw(), e),
     }
 }
