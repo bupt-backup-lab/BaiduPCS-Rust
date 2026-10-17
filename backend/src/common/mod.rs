@@ -2,23 +2,25 @@
 //!
 //! 提供跨模块使用的通用组件
 
+pub mod atomic_write;
 mod memory_monitor;
+pub mod path_utils;
 pub mod proxy;
 pub mod proxy_fallback;
-pub mod path_utils;
 pub mod reclaim_tracker;
-pub mod retry;
 mod refresh_coordinator;
+pub mod retry;
 mod speed_anomaly_detector;
 mod thread_stagnation_detector;
 
+pub use atomic_write::{cleanup_stale_tmp_files, write_atomic, write_atomic_sync};
 pub use memory_monitor::{MemoryAnomaly, MemoryMonitor, MemoryMonitorConfig, MemorySample};
+pub use path_utils::generate_unique_path;
 pub use proxy::{ProxyConfig, ProxyType};
 pub use proxy_fallback::{
-    is_proxy_or_connection_error, perform_proxy_hot_update, probe_proxy,
-    start_proxy_probe_task, ProxyFallbackManager, ProxyHotUpdater, ProxyRuntimeStatus,
+    is_proxy_or_connection_error, perform_proxy_hot_update, probe_proxy, start_proxy_probe_task,
+    ProxyFallbackManager, ProxyHotUpdater, ProxyRuntimeStatus,
 };
-pub use path_utils::generate_unique_path;
 pub use refresh_coordinator::{RefreshCoordinator, RefreshCoordinatorConfig, RefreshGuard};
 pub use speed_anomaly_detector::{SpeedAnomalyConfig, SpeedAnomalyDetector};
 pub use thread_stagnation_detector::{StagnationConfig, ThreadStagnationDetector};
