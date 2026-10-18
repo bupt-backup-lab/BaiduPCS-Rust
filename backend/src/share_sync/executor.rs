@@ -38,7 +38,8 @@ use std::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-const TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// 等转存 / 下载完成时允许的最长无进展时间；重启续跑接管（manager）也用同一口径。
+pub(crate) const TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const TASK_OPERATION_MAX_ATTEMPTS: usize = 3;
 /// 二分递归深度上限（既用于失败后二分,也用于 Netdisk 主动预拆批）。
 const BISECT_MAX_DEPTH: u32 = 32;
@@ -1245,7 +1246,7 @@ impl<'a> ShareSyncExecutor<'a> {
             summary,
             0,
         )
-            .await
+        .await
     }
 
     /// 收走一次「已提交但被放弃」的转存任务（连带它派生的下载子任务）。
@@ -1349,8 +1350,10 @@ impl<'a> ShareSyncExecutor<'a> {
         }
         let target_kind = record_kind;
         let strategy = target.effective_conflict_strategy(self.subscription.conflict_strategy);
-        let internal_label =
-            format!("share-sync/{}/tree/d{}/{}", self.subscription.id, depth, run_id);
+        let internal_label = format!(
+            "share-sync/{}/tree/d{}/{}",
+            self.subscription.id, depth, run_id
+        );
 
         let first_path = tree.get(indices[0]).path.clone();
         info!(
@@ -1373,8 +1376,7 @@ impl<'a> ShareSyncExecutor<'a> {
                 .ok()
                 .map(|v| v != "0" && v.to_lowercase() != "false")
                 .unwrap_or(true);
-            if bisect_enabled && self.op_transfers_to_netdisk(target) && depth < BISECT_MAX_DEPTH
-            {
+            if bisect_enabled && self.op_transfers_to_netdisk(target) && depth < BISECT_MAX_DEPTH {
                 let leaf_count: usize = indices
                     .iter()
                     .map(|&i| tree.descendants_leaves(i).len())
@@ -1684,7 +1686,7 @@ impl<'a> ShareSyncExecutor<'a> {
                                 run_id,
                                 "already_exists_local_fallback_failed",
                             )
-                                .await;
+                            .await;
                             final_err = e;
                         }
                     }
@@ -1894,12 +1896,18 @@ impl<'a> ShareSyncExecutor<'a> {
         let chunk_size = share_sync_leaf_batch_limit().max(1);
         let batch_count = (leaves.len() + chunk_size - 1) / chunk_size;
         let (added_count, modified_count) =
-            leaves.iter().fold((0usize, 0usize), |(added, modified), &leaf_idx| {
-                match action_for_path(action_by_path, &tree.get(leaf_idx).path) {
-                    SyncAction::Modified => (added, modified + 1),
-                    _ => (added + 1, modified),
-                }
-            });
+            leaves
+                .iter()
+                .fold(
+                    (0usize, 0usize),
+                    |(added, modified), &leaf_idx| match action_for_path(
+                        action_by_path,
+                        &tree.get(leaf_idx).path,
+                    ) {
+                        SyncAction::Modified => (added, modified + 1),
+                        _ => (added + 1, modified),
+                    },
+                );
         info!(
             "share_sync_placeholder_leaf_batch: run_id={} node_path={} original_leaves={} pending_leaves={} skipped_existing={} added={} modified={} chunk_size={} batches={} target={:?}",
             run_id,
@@ -1936,7 +1944,6 @@ impl<'a> ShareSyncExecutor<'a> {
             Some(c) => Err(c),
         }
     }
-
 
     /// 处理 added/modified 文件
     async fn process_added_or_modified(
@@ -2963,8 +2970,16 @@ mod tests {
             submitted
         );
         // 干净子目录应各自被整目录提交
-        assert!(submitted.contains(&10), "clean dir /root/01 未被转存: {:?}", submitted);
-        assert!(submitted.contains(&20), "clean dir /root/02 未被转存: {:?}", submitted);
+        assert!(
+            submitted.contains(&10),
+            "clean dir /root/01 未被转存: {:?}",
+            submitted
+        );
+        assert!(
+            submitted.contains(&20),
+            "clean dir /root/02 未被转存: {:?}",
+            submitted
+        );
     }
 
     /// 复现 issue #128 追加反馈的「多层级」场景：pruned 链贯穿 4 层
@@ -3005,8 +3020,16 @@ mod tests {
             mk_dir("/大主宰3D/S02 连载中/S02 4K NoSub/花絮", 5, false),
             item("/大主宰3D/S02 连载中/S02 4K NoSub/花絮/mv.mp4", 51, 10),
             // 存活文件（HEVC 版本未被排除）
-            item("/大主宰3D/S02 连载中/S02 4K NoSub/E01.4K.HEVC-GM.mp4", 31, 100),
-            item("/大主宰3D/S02 连载中/S02 4K NoSub/E02.4K.HEVC-GM.mp4", 32, 100),
+            item(
+                "/大主宰3D/S02 连载中/S02 4K NoSub/E01.4K.HEVC-GM.mp4",
+                31,
+                100,
+            ),
+            item(
+                "/大主宰3D/S02 连载中/S02 4K NoSub/E02.4K.HEVC-GM.mp4",
+                32,
+                100,
+            ),
         ];
         let curr = ShareSnapshot::with_items(&s.id, items);
 
@@ -3043,9 +3066,21 @@ mod tests {
             );
         }
         // 存活文件与干净子目录必须被提交
-        assert!(submitted.contains(&31), "存活文件 E01 未被转存: {:?}", submitted);
-        assert!(submitted.contains(&32), "存活文件 E02 未被转存: {:?}", submitted);
-        assert!(submitted.contains(&5), "干净子目录 /花絮 未被整目录转存: {:?}", submitted);
+        assert!(
+            submitted.contains(&31),
+            "存活文件 E01 未被转存: {:?}",
+            submitted
+        );
+        assert!(
+            submitted.contains(&32),
+            "存活文件 E02 未被转存: {:?}",
+            submitted
+        );
+        assert!(
+            submitted.contains(&5),
+            "干净子目录 /花絮 未被整目录转存: {:?}",
+            submitted
+        );
     }
 
     /// pruned 目录若其后代也被逐层剔除，最终无存活子节点，则整目录被跳过（不提交）。
@@ -3396,10 +3431,7 @@ mod tests {
         assert_eq!(outcome.status, RunStatus::Completed);
         assert_eq!(hooks.transfers.lock().unwrap().len(), 0);
         assert_eq!(hooks.downloads.lock().unwrap().len(), 1);
-        assert_eq!(
-            *hooks.download_netdisk_dirs.lock().unwrap(),
-            vec![None]
-        );
+        assert_eq!(*hooks.download_netdisk_dirs.lock().unwrap(), vec![None]);
     }
 
     #[test]
@@ -3774,7 +3806,10 @@ mod tests {
         // 回退确实发生:成功的那次下载是分享直下(netdisk_dir=None)。
         let dirs = hooks.download_netdisk_dirs.lock().unwrap();
         assert_eq!(dirs.len(), 1);
-        assert_eq!(dirs[0], None, "回退必须走分享直下(临时目录),netdisk_dir=None");
+        assert_eq!(
+            dirs[0], None,
+            "回退必须走分享直下(临时目录),netdisk_dir=None"
+        );
         assert_eq!(hooks.batch_downloads.lock().unwrap().len(), 1);
         let items = pm.list_run_items(&outcome.run_id).unwrap();
         assert!(!items.is_empty());

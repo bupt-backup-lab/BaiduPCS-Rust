@@ -1,7 +1,7 @@
 //! 文件夹下载管理器
 
-use crate::autobackup::record::BackupRecordManager;
 use crate::auth::types::Uid;
+use crate::autobackup::record::BackupRecordManager;
 use crate::downloader::{DownloadManager, DownloadTask, TaskStatus};
 use crate::netdisk::{ClientPool, NetdiskClient};
 use crate::server::events::{DownloadEvent, FolderEvent, TaskEvent};
@@ -16,9 +16,8 @@ use tracing::{debug, error, info, warn};
 
 use super::folder::{FolderDownload, FolderStatus, PendingFile};
 use crate::persistence::{
-    delete_folder as delete_folder_persistence, load_all_folders,
-    remove_folder_from_history, remove_tasks_by_group_from_history, save_folder, FolderPersisted,
-    PersistenceManager,
+    delete_folder as delete_folder_persistence, load_all_folders, remove_folder_from_history,
+    remove_tasks_by_group_from_history, save_folder, FolderPersisted, PersistenceManager,
 };
 
 /// 文件夹下载任务的槽位优先级。
@@ -34,9 +33,7 @@ use crate::persistence::{
 /// 2. 分享同步的文件夹会把**同一个订阅**里正在跑的单文件下载（Backup）踢下槽位。
 ///
 /// 只有用户手动发起（`backup_config_id == None`）的文件夹下载才是 `Normal`。
-fn folder_slot_priority(
-    backup_config_id: Option<&str>,
-) -> crate::task_slot_pool::TaskPriority {
+fn folder_slot_priority(backup_config_id: Option<&str>) -> crate::task_slot_pool::TaskPriority {
     if backup_config_id.is_some() {
         crate::task_slot_pool::TaskPriority::Backup
     } else {
@@ -69,8 +66,7 @@ pub struct FolderDownloadManager {
     /// 同一个 sender，子任务完成时统一推到 listener，由 listener 按 `folder.owner_uid`
     /// 路由到对应账号 manager 做槽位释放 / 补任务。保留为字段以便登录路径
     /// （新增账号 manager 时）能取到现有 sender 注入。
-    task_completed_tx:
-        Arc<RwLock<Option<mpsc::UnboundedSender<(String, String, u64, u64, bool)>>>>,
+    task_completed_tx: Arc<RwLock<Option<mpsc::UnboundedSender<(String, String, u64, u64, bool)>>>>,
     /// 持久化管理器（用于访问历史数据库）
     persistence_manager: Arc<RwLock<Option<Arc<tokio::sync::Mutex<PersistenceManager>>>>>,
     /// 🔥 备份记录管理器（用于文件夹名还原）
@@ -88,12 +84,12 @@ pub struct FolderDownloadManager {
     /// 错位。
     download_manager_pool:
         Arc<RwLock<Option<Arc<dashmap::DashMap<crate::auth::Uid, Arc<DownloadManager>>>>>>,
-    /// 🔥 文件夹快照上次落盘时间（folder_id → Instant），用于 `persist_folder_throttled` 节流
+    /// 🔥 文件夹快照节流落盘的簿记，用于 `persist_folder_throttled` 节流
     ///
     /// 补任务会持续从 `pending_files` 取走文件，若不落盘，重启后队列会退回旧状态并重复
     /// 下载（issue #141）；但每完成一个子任务就全量重写快照，大文件夹（万级 pending）
     /// 会产生大量写放大，故按时间窗口节流。
-    last_persist_at: Arc<RwLock<HashMap<String, std::time::Instant>>>,
+    persist_throttle: Arc<RwLock<PersistThrottle>>,
     /// 🔥 全局配置（延迟注入）
     ///
     /// 仅用于在文件夹自身未携带冲突策略时回退到用户设置的全局默认值，
@@ -106,6 +102,20 @@ pub struct FolderDownloadManager {
 /// 崩溃最多丢失该窗口内的补任务记录；这部分由恢复时的 `reconcile_pending_files`
 /// 对账兜底，不会造成重复下载。
 const FOLDER_PERSIST_THROTTLE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// 🔥 文件夹快照节流落盘的簿记
+#[derive(Debug, Default)]
+struct PersistThrottle {
+    /// 上次落盘时间（folder_id → Instant）
+    last_at: HashMap<String, std::time::Instant>,
+    /// 被节流挡下、还欠一次落盘的文件夹
+    ///
+    /// 只节流不补写的话，窗口内最后一次改动要等「下一次」触发才落盘 —— 而下一次可能
+    /// 永远不来：文件夹只剩一个卡住不动的子任务时，进度、完成事件都停了，快照就一直停在
+    /// 旧值（实测完成了 5 个文件、快照里还是 2 个，强杀重启后文件夹卡死在 3/6）。
+    /// 记下欠账，由 `start_pending_refill_loop` 每轮补写，最多晚一两个节流窗口。
+    dirty: HashSet<String>,
+}
 
 /// 🔥 子任务在文件夹层面的自动重试次数上限
 ///
@@ -210,27 +220,36 @@ fn clear_failed_for_success(
 /// `pending_files` 的主路径（每完成一个子任务就补建一个），必须能落盘，否则 issue #141
 /// 在这条路径上原样复现。
 ///
-/// `throttle = true` 时，距上次落盘不足 `FOLDER_PERSIST_THROTTLE` 直接跳过。
+/// `throttle = true` 时，距上次落盘不足 `FOLDER_PERSIST_THROTTLE` 不写，只记一笔欠账
+/// （见 `PersistThrottle::dirty`），由 `start_pending_refill_loop` 稍后补写。
 async fn persist_folder_state(
     folders: &Arc<RwLock<HashMap<String, FolderDownload>>>,
     wal_dir: &Arc<RwLock<Option<PathBuf>>>,
-    last_persist_at: &Arc<RwLock<HashMap<String, std::time::Instant>>>,
+    persist_throttle: &Arc<RwLock<PersistThrottle>>,
     folder_id: &str,
     throttle: bool,
 ) {
-    if throttle {
-        let last = last_persist_at.read().await;
-        if let Some(at) = last.get(folder_id) {
-            if at.elapsed() < FOLDER_PERSIST_THROTTLE {
-                return;
-            }
-        }
-    }
-
     let wal_dir = match wal_dir.read().await.clone() {
         Some(dir) => dir,
         None => return, // WAL 目录未设置，跳过持久化
     };
+
+    // 先登记「已落盘」再取快照：取快照之后发生的改动会重新记欠账，不会被这里清掉。
+    {
+        let mut state = persist_throttle.write().await;
+        if throttle {
+            if let Some(at) = state.last_at.get(folder_id) {
+                if at.elapsed() < FOLDER_PERSIST_THROTTLE {
+                    state.dirty.insert(folder_id.to_string());
+                    return;
+                }
+            }
+        }
+        state.dirty.remove(folder_id);
+        state
+            .last_at
+            .insert(folder_id.to_string(), std::time::Instant::now());
+    }
 
     let folder = {
         let guard = folders.read().await;
@@ -241,14 +260,14 @@ async fn persist_folder_state(
         let persisted = FolderPersisted::from_folder(&folder);
         if let Err(e) = save_folder(&wal_dir, &persisted) {
             error!("持久化文件夹 {} 失败: {}", folder_id, e);
+            // 没写成就还欠着，下一轮补写再试
+            persist_throttle
+                .write()
+                .await
+                .dirty
+                .insert(folder_id.to_string());
         }
     }
-
-    // 记录落盘时间，避免紧接着的节流落盘做无谓的重复写
-    last_persist_at
-        .write()
-        .await
-        .insert(folder_id.to_string(), std::time::Instant::now());
 }
 
 impl FolderDownloadManager {
@@ -268,7 +287,7 @@ impl FolderDownloadManager {
             backup_record_manager: Arc::new(RwLock::new(None)),
             client_pool: Arc::new(RwLock::new(None)),
             download_manager_pool: Arc::new(RwLock::new(None)),
-            last_persist_at: Arc::new(RwLock::new(HashMap::new())),
+            persist_throttle: Arc::new(RwLock::new(PersistThrottle::default())),
             app_config: Arc::new(RwLock::new(None)),
         }
     }
@@ -315,9 +334,7 @@ impl FolderDownloadManager {
     pub async fn download_manager_for(&self, uid: Uid) -> Option<Arc<DownloadManager>> {
         // 路径 1：pool 已注入 → 严格按 uid 命中或返回 None
         if let Some(pool_arc) = self.download_manager_pool.read().await.as_ref() {
-            return pool_arc
-                .get(&uid)
-                .map(|entry| Arc::clone(entry.value()));
+            return pool_arc.get(&uid).map(|entry| Arc::clone(entry.value()));
         }
         // 路径 2：pool 未注入 → legacy 全局 download_manager（单账号兼容）
         self.download_manager.read().await.clone()
@@ -374,22 +391,33 @@ impl FolderDownloadManager {
         let rm = self.backup_record_manager.read().await;
         if let Some(ref record_manager) = *rm {
             // 🔥 直接通过加密文件夹名查询（加密名是 UUID 格式，全局唯一，无需 config_id）
-            if let Ok(snapshots) = record_manager.get_all_folder_mappings_by_encrypted_name(encrypted_name) {
+            if let Ok(snapshots) =
+                record_manager.get_all_folder_mappings_by_encrypted_name(encrypted_name)
+            {
                 // 优先匹配 parent_path
                 for snapshot in &snapshots {
                     if snapshot.original_path == parent_path {
-                        info!("还原文件夹名（精确匹配）: {} -> {}", encrypted_name, snapshot.original_name);
+                        info!(
+                            "还原文件夹名（精确匹配）: {} -> {}",
+                            encrypted_name, snapshot.original_name
+                        );
                         return Some(snapshot.original_name.clone());
                     }
                 }
                 // 如果没有精确匹配，返回第一个结果（加密名是 UUID，理论上只有一条记录）
                 if let Some(snapshot) = snapshots.first() {
-                    info!("还原文件夹名（首条记录）: {} -> {}", encrypted_name, snapshot.original_name);
+                    info!(
+                        "还原文件夹名（首条记录）: {} -> {}",
+                        encrypted_name, snapshot.original_name
+                    );
                     return Some(snapshot.original_name.clone());
                 }
             }
         } else {
-            warn!("backup_record_manager 未设置，无法还原加密文件夹名: {}", encrypted_name);
+            warn!(
+                "backup_record_manager 未设置，无法还原加密文件夹名: {}",
+                encrypted_name
+            );
         }
         None
     }
@@ -460,7 +488,10 @@ impl FolderDownloadManager {
         let mut folders = self.folders.write().await;
         if let Some(folder) = folders.get_mut(folder_id) {
             folder.transfer_task_id = Some(transfer_task_id.clone());
-            info!("设置文件夹 {} 关联转存任务 ID: {}", folder_id, transfer_task_id);
+            info!(
+                "设置文件夹 {} 关联转存任务 ID: {}",
+                folder_id, transfer_task_id
+            );
             // 持久化更新
             drop(folders);
             self.persist_folder(folder_id).await;
@@ -486,11 +517,11 @@ impl FolderDownloadManager {
         persist_folder_state(
             &self.folders,
             &self.wal_dir,
-            &self.last_persist_at,
+            &self.persist_throttle,
             folder_id,
             false,
         )
-            .await;
+        .await;
     }
 
     /// 🔥 节流持久化文件夹状态
@@ -503,16 +534,46 @@ impl FolderDownloadManager {
         persist_folder_state(
             &self.folders,
             &self.wal_dir,
-            &self.last_persist_at,
+            &self.persist_throttle,
             folder_id,
             true,
         )
-            .await;
+        .await;
     }
 
     /// 🔥 清理文件夹的节流落盘记录（文件夹被删除/取消时调用，避免 map 无限增长）
     async fn forget_persist_state(&self, folder_id: &str) {
-        self.last_persist_at.write().await.remove(folder_id);
+        let mut state = self.persist_throttle.write().await;
+        state.last_at.remove(folder_id);
+        state.dirty.remove(folder_id);
+    }
+
+    /// 🔥 补写被节流挡下的文件夹快照（见 `PersistThrottle::dirty`）
+    ///
+    /// `force = false`：仍受节流窗口约束，没到时间的留到下一轮；供周期循环调用。
+    /// `force = true`：立刻全部写掉；供优雅关闭调用，进程退出前把欠账清干净。
+    pub async fn flush_dirty_folders(&self, force: bool) {
+        let dirty: Vec<String> = {
+            let state = self.persist_throttle.read().await;
+            state.dirty.iter().cloned().collect()
+        };
+        for folder_id in dirty {
+            // 已完成的文件夹在置终态时已同步落盘（终态分支不走节流），欠账是终态之前记下的。
+            // 定时归档会把已完成的快照移进历史库并删掉文件，这里再补写会把它写回磁盘。
+            let completed = matches!(
+                self.folders.read().await.get(&folder_id).map(|f| &f.status),
+                Some(FolderStatus::Completed)
+            );
+            if completed {
+                self.persist_throttle.write().await.dirty.remove(&folder_id);
+                continue;
+            }
+            if force {
+                self.persist_folder(&folder_id).await;
+            } else {
+                self.persist_folder_throttled(&folder_id).await;
+            }
+        }
     }
 
     /// 🔥 按存活文件夹裁剪节流落盘记录
@@ -524,10 +585,9 @@ impl FolderDownloadManager {
             let folders = self.folders.read().await;
             folders.keys().cloned().collect()
         };
-        self.last_persist_at
-            .write()
-            .await
-            .retain(|id, _| alive.contains(id));
+        let mut state = self.persist_throttle.write().await;
+        state.last_at.retain(|id, _| alive.contains(id));
+        state.dirty.retain(|id| alive.contains(id));
     }
 
     /// 🔥 解析文件夹生效的下载冲突策略
@@ -668,10 +728,7 @@ impl FolderDownloadManager {
             restored += 1;
         }
 
-        info!(
-            "文件夹恢复完成: 恢复 {} 个, 跳过 {} 个",
-            restored, skipped
-        );
+        info!("文件夹恢复完成: 恢复 {} 个, 跳过 {} 个", restored, skipped);
 
         (restored, skipped)
     }
@@ -686,7 +743,10 @@ impl FolderDownloadManager {
         // 获取所有文件夹 (id, owner_uid)
         let folders_meta: Vec<(String, crate::auth::Uid)> = {
             let folders = self.folders.read().await;
-            folders.iter().map(|(k, f)| (k.clone(), f.owner_uid)).collect()
+            folders
+                .iter()
+                .map(|(k, f)| (k.clone(), f.owner_uid))
+                .collect()
         };
 
         for (folder_id, folder_owner_uid) in folders_meta {
@@ -727,7 +787,8 @@ impl FolderDownloadManager {
                     // folder.downloaded_size 来自持久化，已包含已完成任务的字节数
                     // downloaded_size（此处变量）= 仅活跃任务之和
                     // 差值即为已完成任务的累计字节数
-                    folder.completed_downloaded_size = folder.downloaded_size.saturating_sub(downloaded_size);
+                    folder.completed_downloaded_size =
+                        folder.downloaded_size.saturating_sub(downloaded_size);
 
                     // 🔥 维护 borrowed_subtask_map：记录使用借调位的子任务
                     // 这样在回收借调位时才能正确找到并暂停对应的子任务
@@ -794,7 +855,7 @@ impl FolderDownloadManager {
                     if let Some(folder) = folders.get(&folder_id) {
                         (
                             folder.borrowed_subtask_map.get(task_id).copied(),
-                            folder.fixed_slot_id
+                            folder.fixed_slot_id,
                         )
                     } else {
                         (None, None)
@@ -964,8 +1025,10 @@ impl FolderDownloadManager {
                 // 🔥 应用冲突策略
                 let final_local_path = {
                     use crate::uploader::conflict_resolver::ConflictResolver;
-                    match ConflictResolver::resolve_download_conflict(&local_path, conflict_strategy)
-                    {
+                    match ConflictResolver::resolve_download_conflict(
+                        &local_path,
+                        conflict_strategy,
+                    ) {
                         Ok(crate::uploader::conflict::ConflictResolution::Proceed) => local_path,
                         Ok(crate::uploader::conflict::ConflictResolution::Skip) => {
                             info!("跳过下载（文件已存在）: {:?}", local_path);
@@ -994,7 +1057,7 @@ impl FolderDownloadManager {
                                 &pending_file.relative_path,
                                 folder_owner_uid,
                             )
-                                .await;
+                            .await;
                             continue;
                         }
                         Ok(crate::uploader::conflict::ConflictResolution::UseNewPath(new_path)) => {
@@ -1116,7 +1179,9 @@ impl FolderDownloadManager {
         let (folder_progress_tx, folder_progress_rx) = mpsc::unbounded_channel::<String>();
 
         // 🔥 设置文件夹进度发送器到下载管理器（供子任务使用）
-        manager.set_folder_progress_sender(folder_progress_tx.clone()).await;
+        manager
+            .set_folder_progress_sender(folder_progress_tx.clone())
+            .await;
 
         // 保存 download_manager
         {
@@ -1136,9 +1201,7 @@ impl FolderDownloadManager {
         // 启动文件夹进度监听器
         self.start_folder_progress_listener(folder_progress_rx);
 
-        info!(
-            "文件夹下载管理器已设置下载管理器，任务完成监听和进度监听器已启动（首次初始化）"
-        );
+        info!("文件夹下载管理器已设置下载管理器，任务完成监听和进度监听器已启动（首次初始化）");
     }
 
     /// 🔥 把已存在的 task_completed / folder_progress sender 注入到新 manager
@@ -1192,6 +1255,9 @@ impl FolderDownloadManager {
             loop {
                 ticker.tick().await;
 
+                // 先补写被节流挡下的快照（见 `PersistThrottle::dirty`）
+                manager.flush_dirty_folders(false).await;
+
                 // 有待办文件、且处于下载中的文件夹
                 let candidates: Vec<(String, crate::auth::Uid)> = {
                     let folders_guard = manager.folders.read().await;
@@ -1240,7 +1306,7 @@ impl FolderDownloadManager {
         let download_manager_legacy = self.download_manager.clone();
         let ws_manager = self.ws_manager.clone();
         let wal_dir = self.wal_dir.clone();
-        let last_persist_at = self.last_persist_at.clone();
+        let persist_throttle = self.persist_throttle.clone();
 
         tokio::spawn(async move {
             while let Some(folder_id) = rx.recv().await {
@@ -1353,7 +1419,7 @@ impl FolderDownloadManager {
                 //    进度回退到那个旧值（实测连续三次重启都回到同一个字节数）。
                 //
                 //    走节流版本：本监听器由子任务进度节流器驱动，频率很高。
-                persist_folder_state(&folders, &wal_dir, &last_persist_at, &folder_id, true).await;
+                persist_folder_state(&folders, &wal_dir, &persist_throttle, &folder_id, true).await;
             }
         });
     }
@@ -1366,14 +1432,17 @@ impl FolderDownloadManager {
     /// `self.download_manager_pool` 解析 manager，不再读单例
     /// `self.download_manager`（避免账号切换后用错 manager 释放槽 / 补任务 /
     /// 把 owner=A 的新子任务塞进 B manager）
-    fn start_task_completed_listener(&self, mut rx: mpsc::UnboundedReceiver<(String, String, u64, u64, bool)>) {
+    fn start_task_completed_listener(
+        &self,
+        mut rx: mpsc::UnboundedReceiver<(String, String, u64, u64, bool)>,
+    ) {
         let folders = self.folders.clone();
         let download_manager_pool = self.download_manager_pool.clone();
         let download_manager_legacy = self.download_manager.clone();
         let wal_dir = self.wal_dir.clone();
         let ws_manager = self.ws_manager.clone();
         let cancellation_tokens = self.cancellation_tokens.clone();
-        let last_persist_at = self.last_persist_at.clone();
+        let persist_throttle = self.persist_throttle.clone();
         let app_config = self.app_config.clone();
 
         tokio::spawn(async move {
@@ -1418,10 +1487,13 @@ impl FolderDownloadManager {
                     // 🔥 直接处理收到的 task_id
                     // 🔥 本次失败若还有重试额度，记下是第几次，锁释放后再重新入队
                     let mut retry_attempt: Option<u32> = None;
+                    // 本次是否改了需要持久化的完成账（completed_count / counted_fs_ids / pending）
+                    let mut completion_recorded = false;
                     let (slot_id_to_release, released_fixed_slot) = {
                         let mut folders_guard = folders.write().await;
 
                         if let Some(folder) = folders_guard.get_mut(&group_id) {
+                            completion_recorded = is_success;
                             // 🔥 检查这个**文件**是否已经被计数过（issue #156）
                             //
                             //    去重键必须是 fs_id 而不是 task_id：task_id 是每次建任务新生成的
@@ -1439,7 +1511,9 @@ impl FolderDownloadManager {
                             };
 
                             // A. 处理借调位映射
-                            let slot_id = if let Some(slot_id) = folder.borrowed_subtask_map.remove(&task_id) {
+                            let slot_id = if let Some(slot_id) =
+                                folder.borrowed_subtask_map.remove(&task_id)
+                            {
                                 info!(
                                     "子任务 {} 完成，清理借调位映射: slot_id={}, folder={}",
                                     task_id, slot_id, group_id
@@ -1519,12 +1593,20 @@ impl FolderDownloadManager {
                                     folder.failed_count = folder.failed_count.saturating_sub(1);
                                     info!(
                                         "文件夹 {} 子任务重试成功 {}/{} (task_id={}, file_size={})",
-                                        group_id, folder.completed_count, folder.total_files, task_id, file_size
+                                        group_id,
+                                        folder.completed_count,
+                                        folder.total_files,
+                                        task_id,
+                                        file_size
                                     );
                                 } else {
                                     info!(
                                         "文件夹 {} 已完成 {}/{} 个文件 (task_id={}, file_size={})",
-                                        group_id, folder.completed_count, folder.total_files, task_id, file_size
+                                        group_id,
+                                        folder.completed_count,
+                                        folder.total_files,
+                                        task_id,
+                                        file_size
                                     );
                                 }
                             } else if !is_success && !already_counted {
@@ -1560,6 +1642,27 @@ impl FolderDownloadManager {
                             (None, false)
                         }
                     }; // 锁在此处自动释放
+
+                    // 🔥 完成账必须落盘。
+                    //
+                    //    子任务的 WAL 在发出完成通知之前就已删除、记录归档进历史库，从这一刻起
+                    //    「这个文件下完了」只记在文件夹快照里。此前这里不落盘，要等下一次补任务
+                    //    或进度事件顺带写 —— 文件夹只剩卡住的子任务时就再也等不到，强杀重启后
+                    //    这几个文件两头都找不到，文件夹永远凑不满 total_files。
+                    //
+                    //    走节流：小文件密集完成时每个都全量重写快照，写放大太大；被节流挡下的
+                    //    会记欠账，由周期循环补写。窗口内被强杀的那几个，恢复时由
+                    //    `reconcile_pending_files` 从历史库补回。
+                    if completion_recorded {
+                        persist_folder_state(
+                            &folders,
+                            &wal_dir,
+                            &persist_throttle,
+                            &group_id,
+                            true,
+                        )
+                        .await;
+                    }
 
                     // 🔥 释放锁后，释放借调槽位（文件夹 fixed slot 不入 task_slot_pool 释放流程）
                     if let Some(slot_id) = slot_id_to_release {
@@ -1627,8 +1730,12 @@ impl FolderDownloadManager {
                     let folders_guard = folders.read().await;
                     if let Some(folder) = folders_guard.get(&group_id) {
                         // 计算有多少借调位是空闲的（未分配给子任务）
-                        let free_borrowed_slots = folder.borrowed_slot_ids.iter()
-                            .filter(|&&slot_id| !folder.borrowed_subtask_map.values().any(|&s| s == slot_id))
+                        let free_borrowed_slots = folder
+                            .borrowed_slot_ids
+                            .iter()
+                            .filter(|&&slot_id| {
+                                !folder.borrowed_subtask_map.values().any(|&s| s == slot_id)
+                            })
                             .count();
 
                         // 固定位也可以用于一个子任务，所以总数 = 空闲借调位 + 1（如果有固定位）
@@ -1756,14 +1863,17 @@ impl FolderDownloadManager {
                         && active_count == 0
                         && folder.failed_count > 0
                         && (folder.completed_count + folder.skipped_count + folder.failed_count)
-                        >= folder.total_files
+                            >= folder.total_files
                     {
                         let old_status = format!("{:?}", folder.status).to_lowercase();
                         let error_msg = format!("{} 个文件下载失败", folder.failed_count);
                         folder.mark_failed(error_msg.clone());
                         info!(
                             "文件夹 {} 下载完成但有 {} 个失败 (completed={}, failed={})",
-                            folder.name, folder.failed_count, folder.completed_count, folder.failed_count
+                            folder.name,
+                            folder.failed_count,
+                            folder.completed_count,
+                            folder.failed_count
                         );
 
                         // 持久化
@@ -1826,10 +1936,8 @@ impl FolderDownloadManager {
                 }
 
                 // 🔥 关键修复：收集所有子任务已占用的槽位，用于防止重复分配
-                let mut used_slot_ids: std::collections::HashSet<usize> = tasks
-                    .iter()
-                    .filter_map(|t| t.slot_id)
-                    .collect();
+                let mut used_slot_ids: std::collections::HashSet<usize> =
+                    tasks.iter().filter_map(|t| t.slot_id).collect();
 
                 // 根据余量补充任务
                 let files_to_create = {
@@ -1889,7 +1997,12 @@ impl FolderDownloadManager {
                         .take(available)
                         .cloned()
                         .collect();
-                    (files, folder.local_root.clone(), folder.remote_root.clone(), folder.owner_uid)
+                    (
+                        files,
+                        folder.local_root.clone(),
+                        folder.remote_root.clone(),
+                        folder.owner_uid,
+                    )
                 };
 
                 let (files, local_root, group_root, folder_owner_uid) = files_to_create;
@@ -1951,7 +2064,9 @@ impl FolderDownloadManager {
                             &local_path,
                             conflict_strategy,
                         ) {
-                            Ok(crate::uploader::conflict::ConflictResolution::Proceed) => local_path,
+                            Ok(crate::uploader::conflict::ConflictResolution::Proceed) => {
+                                local_path
+                            }
                             Ok(crate::uploader::conflict::ConflictResolution::Skip) => {
                                 info!("跳过下载（文件已存在）: {:?}", local_path);
                                 // 🔥 跳过的文件必须从 pending_files 摘掉（issue #156）
@@ -1982,12 +2097,12 @@ impl FolderDownloadManager {
                                     &file_to_create.relative_path,
                                     folder_owner_uid,
                                 )
-                                    .await;
+                                .await;
                                 continue;
                             }
                             Ok(crate::uploader::conflict::ConflictResolution::UseNewPath(
-                                   new_path,
-                               )) => {
+                                new_path,
+                            )) => {
                                 info!("自动重命名下载路径: {:?} -> {}", local_path, new_path);
                                 PathBuf::from(new_path)
                             }
@@ -2036,17 +2151,15 @@ impl FolderDownloadManager {
                     let fixed_slot_claim: Option<usize> = {
                         let folders_guard = folders.read().await;
                         match folders_guard.get(&group_id) {
-                            Some(folder) => {
-                                match folder.fixed_slot_id {
-                                    Some(fixed_slot_id)
+                            Some(folder) => match folder.fixed_slot_id {
+                                Some(fixed_slot_id)
                                     if !used_slot_ids.contains(&fixed_slot_id)
                                         && folder.fixed_slot_subtask.is_none() =>
-                                        {
-                                            Some(fixed_slot_id)
-                                        }
-                                    _ => None,
+                                {
+                                    Some(fixed_slot_id)
                                 }
-                            }
+                                _ => None,
+                            },
                             None => {
                                 // 文件夹不存在，跳过当前文件
                                 continue;
@@ -2081,7 +2194,8 @@ impl FolderDownloadManager {
                                 let mut assigned = false;
                                 for &slot_id in &folder.borrowed_slot_ids {
                                     // 🔥 关键修复：同时检查 borrowed_subtask_map 和 used_slot_ids
-                                    let in_map = folder.borrowed_subtask_map.values().any(|&s| s == slot_id);
+                                    let in_map =
+                                        folder.borrowed_subtask_map.values().any(|&s| s == slot_id);
                                     let in_use = used_slot_ids.contains(&slot_id);
                                     if !in_map && !in_use {
                                         // 找到一个空闲的借调位，分配给此任务
@@ -2092,8 +2206,11 @@ impl FolderDownloadManager {
                                         // 登记借调位映射
                                         {
                                             let mut folders_mut = folders.write().await;
-                                            if let Some(folder_mut) = folders_mut.get_mut(&group_id) {
-                                                folder_mut.borrowed_subtask_map.insert(task.id.clone(), slot_id);
+                                            if let Some(folder_mut) = folders_mut.get_mut(&group_id)
+                                            {
+                                                folder_mut
+                                                    .borrowed_subtask_map
+                                                    .insert(task.id.clone(), slot_id);
                                             }
                                         }
                                         // 🔥 关键修复：将分配的槽位加入已使用集合
@@ -2170,11 +2287,11 @@ impl FolderDownloadManager {
                     persist_folder_state(
                         &folders,
                         &wal_dir,
-                        &last_persist_at,
+                        &persist_throttle,
                         &group_id,
                         returned_count == 0,
                     )
-                        .await;
+                    .await;
                 }
             }
         });
@@ -2207,7 +2324,8 @@ impl FolderDownloadManager {
         remote_path: String,
         owner_uid: crate::auth::Uid,
     ) -> Result<String> {
-        self.create_folder_download_with_name(remote_path, None, None, owner_uid).await
+        self.create_folder_download_with_name(remote_path, None, None, owner_uid)
+            .await
     }
 
     /// 创建文件夹下载任务（指定下载目录 + 备份配置归属）
@@ -2231,7 +2349,7 @@ impl FolderDownloadManager {
             owner_uid,
             backup_config_id,
         )
-            .await
+        .await
     }
 
     /// 创建文件夹下载任务（支持指定原始文件夹名）
@@ -2265,12 +2383,18 @@ impl FolderDownloadManager {
             name
         } else {
             // 🔥 尝试从映射表还原加密的文件夹名
-            match self.restore_folder_name(&encrypted_folder_name, &parent_path).await {
+            match self
+                .restore_folder_name(&encrypted_folder_name, &parent_path)
+                .await
+            {
                 Some(restored) => {
-                    info!("还原加密文件夹名: {} -> {}", encrypted_folder_name, restored);
+                    info!(
+                        "还原加密文件夹名: {} -> {}",
+                        encrypted_folder_name, restored
+                    );
                     restored
                 }
-                None => encrypted_folder_name
+                None => encrypted_folder_name,
             }
         };
 
@@ -2285,7 +2409,7 @@ impl FolderDownloadManager {
             owner_uid,
             None,
         )
-            .await
+        .await
     }
 
     /// 创建文件夹下载任务（指定下载目录）
@@ -2312,7 +2436,7 @@ impl FolderDownloadManager {
             owner_uid,
             None,
         )
-            .await
+        .await
     }
 
     async fn create_folder_download_with_dir_inner(
@@ -2344,12 +2468,18 @@ impl FolderDownloadManager {
             name
         } else {
             // 🔥 尝试从映射表还原加密的文件夹名
-            match self.restore_folder_name(&encrypted_folder_name, &parent_path).await {
+            match self
+                .restore_folder_name(&encrypted_folder_name, &parent_path)
+                .await
+            {
                 Some(restored) => {
-                    info!("还原加密文件夹名: {} -> {}", encrypted_folder_name, restored);
+                    info!(
+                        "还原加密文件夹名: {} -> {}",
+                        encrypted_folder_name, restored
+                    );
                     restored
                 }
-                None => encrypted_folder_name
+                None => encrypted_folder_name,
             }
         };
 
@@ -2362,7 +2492,7 @@ impl FolderDownloadManager {
             owner_uid,
             backup_config_id,
         )
-            .await
+        .await
     }
 
     /// 内部方法：创建文件夹下载任务
@@ -2400,9 +2530,10 @@ impl FolderDownloadManager {
                 let slot_pool = dm.task_slot_pool();
                 // 优先级见 `folder_slot_priority`：用户手动发起 → Normal（可抢占备份
                 // 任务）；自动备份 / 分享同步内部 → Backup（只用空闲槽、不抢占）
-                if let Some((slot_id, preempted)) = slot_pool.allocate_fixed_slot_with_priority(
-                    &folder_id, true, slot_priority
-                ).await {
+                if let Some((slot_id, preempted)) = slot_pool
+                    .allocate_fixed_slot_with_priority(&folder_id, true, slot_priority)
+                    .await
+                {
                     (Some(slot_id), preempted)
                 } else {
                     (None, None)
@@ -2429,17 +2560,18 @@ impl FolderDownloadManager {
         // 并行度，等同于「抢别人的资源」，与 Backup「只用空闲槽」的语义冲突。
         // 拿不到就等空槽，由等待队列按 FIFO 唤醒。
         if fixed_slot_id.is_none() && slot_priority == crate::task_slot_pool::TaskPriority::Normal {
-            info!("文件夹 {} 无空闲槽位，尝试回收同账号其他文件夹的借调位", folder_id);
-            if let Some(reclaimed_slot_id) = self
-                .reclaim_borrowed_slot_for_owner(owner_uid)
-                .await
-            {
+            info!(
+                "文件夹 {} 无空闲槽位，尝试回收同账号其他文件夹的借调位",
+                folder_id
+            );
+            if let Some(reclaimed_slot_id) = self.reclaim_borrowed_slot_for_owner(owner_uid).await {
                 // 回收成功，重新分配固定位
                 if let Some(ref dm) = dm_for_owner {
                     let slot_pool = dm.task_slot_pool();
-                    if let Some((slot_id, preempted)) = slot_pool.allocate_fixed_slot_with_priority(
-                        &folder_id, true, slot_priority
-                    ).await {
+                    if let Some((slot_id, preempted)) = slot_pool
+                        .allocate_fixed_slot_with_priority(&folder_id, true, slot_priority)
+                        .await
+                    {
                         fixed_slot_id = Some(slot_id);
                         info!(
                             "文件夹 {} 通过回收借调位获得固定任务位: slot_id={} (回收的槽位={})",
@@ -2481,7 +2613,9 @@ impl FolderDownloadManager {
                 if to_borrow == 0 {
                     (Vec::new(), Vec::new())
                 } else if is_normal_priority {
-                    slot_pool.allocate_borrowed_slots(&folder_id, to_borrow).await
+                    slot_pool
+                        .allocate_borrowed_slots(&folder_id, to_borrow)
+                        .await
                 } else {
                     (
                         slot_pool
@@ -2554,7 +2688,7 @@ impl FolderDownloadManager {
 
                         owner_uid: Some(folder.owner_uid.raw()),
                     })
-                        .await;
+                    .await;
                 }
             }
         }
@@ -2574,7 +2708,7 @@ impl FolderDownloadManager {
             backup_record_manager: self.backup_record_manager.clone(),
             client_pool: self.client_pool.clone(),
             download_manager_pool: self.download_manager_pool.clone(),
-            last_persist_at: self.last_persist_at.clone(),
+            persist_throttle: self.persist_throttle.clone(),
             app_config: self.app_config.clone(),
         };
         let folder_id_clone = folder_id.clone();
@@ -2661,7 +2795,7 @@ impl FolderDownloadManager {
             &remote_root,
             &local_root,
         )
-            .await?;
+        .await?;
 
         // 扫描完成，更新状态并对 pending_files 排序
         let should_publish_status_changed = {
@@ -2670,7 +2804,9 @@ impl FolderDownloadManager {
                 folder.scan_completed = true;
 
                 // 🔥 关键修复：对 pending_files 按相对路径排序，确保子任务顺序一致
-                folder.pending_files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+                folder
+                    .pending_files
+                    .sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
                 let should_change = folder.status == FolderStatus::Scanning;
                 if should_change {
@@ -2695,7 +2831,10 @@ impl FolderDownloadManager {
         }
 
         // 🔥 重命名加密文件夹并更新路径（在创建任务前）
-        if let Err(e) = self.rename_encrypted_folders_and_update_paths(folder_id).await {
+        if let Err(e) = self
+            .rename_encrypted_folders_and_update_paths(folder_id)
+            .await
+        {
             warn!("重命名加密文件夹失败: {}", e);
         }
 
@@ -2728,19 +2867,21 @@ impl FolderDownloadManager {
 
                 owner_uid: owner_uid_raw_opt,
             })
-                .await;
+            .await;
         }
 
         // 🔥 发布扫描完成事件（在锁外发布）
         let scan_event = {
             let folders = self.folders.read().await;
-            folders.get(folder_id).map(|folder| FolderEvent::ScanCompleted {
-                folder_id: folder_id.to_string(),
-                total_files: folder.total_files,
-                total_size: folder.total_size,
+            folders
+                .get(folder_id)
+                .map(|folder| FolderEvent::ScanCompleted {
+                    folder_id: folder_id.to_string(),
+                    total_files: folder.total_files,
+                    total_size: folder.total_size,
 
-                owner_uid: Some(folder.owner_uid.raw()),
-            })
+                    owner_uid: Some(folder.owner_uid.raw()),
+                })
         };
         if let Some(event) = scan_event {
             self.publish_event(event).await;
@@ -2824,14 +2965,14 @@ impl FolderDownloadManager {
 
                 if item.isdir == 1 {
                     // 🔥 检查是否是加密文件夹，收集映射关系
-                    let folder_name = item.path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or("");
+                    let folder_name = item.path.rsplit('/').next().unwrap_or("");
 
-                    if crate::encryption::service::EncryptionService::is_encrypted_folder_name(folder_name) {
+                    if crate::encryption::service::EncryptionService::is_encrypted_folder_name(
+                        folder_name,
+                    ) {
                         // 计算加密文件夹的相对路径
-                        let encrypted_relative = item.path
+                        let encrypted_relative = item
+                            .path
                             .strip_prefix(root_path)
                             .unwrap_or(&item.path)
                             .trim_start_matches('/')
@@ -2846,10 +2987,9 @@ impl FolderDownloadManager {
                         if encrypted_relative != decrypted_relative {
                             let mut folders = self.folders.write().await;
                             if let Some(folder) = folders.get_mut(folder_id) {
-                                folder.encrypted_folder_mappings.insert(
-                                    encrypted_relative.clone(),
-                                    decrypted_relative.clone()
-                                );
+                                folder
+                                    .encrypted_folder_mappings
+                                    .insert(encrypted_relative.clone(), decrypted_relative.clone());
                                 info!(
                                     "收集加密文件夹映射: {} -> {}",
                                     encrypted_relative, decrypted_relative
@@ -2867,7 +3007,7 @@ impl FolderDownloadManager {
                         &item.path,
                         local_root,
                     )
-                        .await?;
+                    .await?;
                 } else {
                     // 计算相对路径
                     let relative_path = item
@@ -2878,9 +3018,8 @@ impl FolderDownloadManager {
                         .to_string();
 
                     // 🔥 还原加密文件夹名
-                    let relative_path = self
-                        .restore_encrypted_path(&relative_path, root_path)
-                        .await;
+                    let relative_path =
+                        self.restore_encrypted_path(&relative_path, root_path).await;
 
                     // 收集文件信息
                     let pending_file = PendingFile {
@@ -2945,7 +3084,10 @@ impl FolderDownloadManager {
     /// 🔥 获取归属指定 `backup_config_id`（如 `share-sync:{订阅id}`）的内存文件夹下载
     ///
     /// 供分享同步收集 tree 模式整目录下载产生的文件夹子任务进度。
-    pub async fn get_folders_by_backup_config(&self, backup_config_id: &str) -> Vec<FolderDownload> {
+    pub async fn get_folders_by_backup_config(
+        &self,
+        backup_config_id: &str,
+    ) -> Vec<FolderDownload> {
         let folders = self.folders.read().await;
         folders
             .values()
@@ -2961,8 +3103,7 @@ impl FolderDownloadManager {
         // 1. 获取内存中的文件夹
         let folders = self.folders.read().await;
         let mut result: Vec<FolderDownload> = folders.values().cloned().collect();
-        let folder_ids: std::collections::HashSet<String> =
-            folders.keys().cloned().collect();
+        let folder_ids: std::collections::HashSet<String> = folders.keys().cloned().collect();
         drop(folders);
 
         // 2. 从历史数据库加载已完成的文件夹
@@ -3012,7 +3153,10 @@ impl FolderDownloadManager {
         let mut folders = self.folders.write().await;
         let mut removed = 0usize;
         for id in folder_ids {
-            if folders.get(id).is_some_and(Self::is_completed_share_sync_folder) {
+            if folders
+                .get(id)
+                .is_some_and(Self::is_completed_share_sync_folder)
+            {
                 folders.remove(id);
                 removed += 1;
             }
@@ -3027,9 +3171,9 @@ impl FolderDownloadManager {
     fn is_completed_share_sync_folder(folder: &FolderDownload) -> bool {
         folder.status == FolderStatus::Completed
             && folder
-            .backup_config_id
-            .as_deref()
-            .is_some_and(|c| c.starts_with("share-sync:"))
+                .backup_config_id
+                .as_deref()
+                .is_some_and(|c| c.starts_with("share-sync:"))
     }
 
     pub async fn clear_completed_folders(&self) -> usize {
@@ -3227,15 +3371,13 @@ impl FolderDownloadManager {
             };
 
             match wal_dir {
-                Some(dir) => {
-                    match crate::persistence::folder::load_folder_history(&dir) {
-                        Ok(folders) => folders,
-                        Err(e) => {
-                            error!("加载文件夹历史失败: {}", e);
-                            Vec::new()
-                        }
+                Some(dir) => match crate::persistence::folder::load_folder_history(&dir) {
+                    Ok(folders) => folders,
+                    Err(e) => {
+                        error!("加载文件夹历史失败: {}", e);
+                        Vec::new()
                     }
-                }
+                },
                 None => {
                     warn!("WAL 目录未设置，跳过加载历史文件夹");
                     Vec::new()
@@ -3360,7 +3502,10 @@ impl FolderDownloadManager {
         // uses_folder_fixed_slot 字段清空，这里只需收尾 folder 侧映射。
         let _ = download_manager; // 仅用于持有 dm 引用直到此处，便于阅读上下文
         self.release_folder_slots(folder_id).await;
-        info!("文件夹 {} 暂停，已释放所有槽位（含 folder 侧映射）", folder_id);
+        info!(
+            "文件夹 {} 暂停，已释放所有槽位（含 folder 侧映射）",
+            folder_id
+        );
 
         // 🔥 关键修复：先持久化，再发送消息
         // 确保前端收到消息时，状态已经保存到磁盘
@@ -3381,7 +3526,7 @@ impl FolderDownloadManager {
 
                 owner_uid: owner_uid_raw_opt,
             })
-                .await;
+            .await;
         }
 
         // 🔥 发布暂停事件
@@ -3390,7 +3535,7 @@ impl FolderDownloadManager {
 
             owner_uid: owner_uid_raw_opt,
         })
-            .await;
+        .await;
 
         info!("文件夹 {} 暂停完成", folder_id);
         Ok(())
@@ -3473,20 +3618,26 @@ impl FolderDownloadManager {
         // 与创建路径同款：后台文件夹（自动备份 / 分享同步）走 Backup 优先级，
         // 恢复时同样只用空闲槽、不抢占。
         let slot_priority = folder_slot_priority(folder_backup_config_id.as_deref());
-        let (mut fixed_slot_id, mut preempted_task_id) =
-            if let Some((slot_id, preempted)) = slot_pool.allocate_fixed_slot_with_priority(
-                folder_id, true, slot_priority
-            ).await {
-                (Some(slot_id), preempted)
-            } else {
-                (None, None)
-            };
+        let (mut fixed_slot_id, mut preempted_task_id) = if let Some((slot_id, preempted)) =
+            slot_pool
+                .allocate_fixed_slot_with_priority(folder_id, true, slot_priority)
+                .await
+        {
+            (Some(slot_id), preempted)
+        } else {
+            (None, None)
+        };
 
         // 🔥 处理被抢占的备份任务
         if let Some(preempted_id) = preempted_task_id.take() {
-            info!("恢复文件夹 {} 抢占了备份任务 {} 的槽位", folder_id, preempted_id);
+            info!(
+                "恢复文件夹 {} 抢占了备份任务 {} 的槽位",
+                folder_id, preempted_id
+            );
             // 暂停被抢占的备份任务并加入等待队列
-            download_manager.handle_preempted_slot_owner(&preempted_id).await;
+            download_manager
+                .handle_preempted_slot_owner(&preempted_id)
+                .await;
         }
 
         // 🔥 如果没有空闲槽位，尝试从同一账号的其他文件夹回收借调位
@@ -3494,15 +3645,19 @@ impl FolderDownloadManager {
         // reclaim 必须按 owner_uid 过滤，避免跨账号误回收
         // 🔥 后台文件夹（Backup 优先级）不参与回收，理由同创建路径
         if fixed_slot_id.is_none() && slot_priority == crate::task_slot_pool::TaskPriority::Normal {
-            info!("恢复文件夹 {} 无空闲槽位，尝试回收同账号其他文件夹的借调位", folder_id);
+            info!(
+                "恢复文件夹 {} 无空闲槽位，尝试回收同账号其他文件夹的借调位",
+                folder_id
+            );
             if let Some(reclaimed_slot_id) = self
                 .reclaim_borrowed_slot_for_owner(folder_owner_uid_for_routing)
                 .await
             {
                 // 回收成功，重新分配固定位（使用优先级分配）
-                if let Some((slot_id, preempted)) = slot_pool.allocate_fixed_slot_with_priority(
-                    folder_id, true, slot_priority
-                ).await {
+                if let Some((slot_id, preempted)) = slot_pool
+                    .allocate_fixed_slot_with_priority(folder_id, true, slot_priority)
+                    .await
+                {
                     fixed_slot_id = Some(slot_id);
                     info!(
                         "恢复文件夹 {} 通过回收借调位获得固定任务位: slot_id={} (回收的槽位={})",
@@ -3511,7 +3666,9 @@ impl FolderDownloadManager {
                     // 处理可能被抢占的备份任务
                     if let Some(preempted_id) = preempted {
                         info!("恢复文件夹 {} 抢占了槽位持有者 {}", folder_id, preempted_id);
-                        download_manager.handle_preempted_slot_owner(&preempted_id).await;
+                        download_manager
+                            .handle_preempted_slot_owner(&preempted_id)
+                            .await;
                     }
                 }
             }
@@ -3521,10 +3678,16 @@ impl FolderDownloadManager {
             let mut folders_guard = self.folders.write().await;
             if let Some(folder) = folders_guard.get_mut(folder_id) {
                 folder.fixed_slot_id = Some(slot_id);
-                info!("恢复文件夹 {} 获得固定任务位: slot_id={}", folder_id, slot_id);
+                info!(
+                    "恢复文件夹 {} 获得固定任务位: slot_id={}",
+                    folder_id, slot_id
+                );
             }
         } else {
-            warn!("恢复文件夹 {} 无法获得固定任务位，将在有空位时重试", folder_id);
+            warn!(
+                "恢复文件夹 {} 无法获得固定任务位，将在有空位时重试",
+                folder_id
+            );
         }
 
         // 2. 按池子容量计算可借调槽位（固定槽位保留 1 个）
@@ -3542,7 +3705,9 @@ impl FolderDownloadManager {
         let (borrowed_slot_ids, preempted_backup_tasks) = if to_borrow == 0 {
             (Vec::new(), Vec::new())
         } else if is_normal_priority {
-            slot_pool.allocate_borrowed_slots(folder_id, to_borrow).await
+            slot_pool
+                .allocate_borrowed_slots(folder_id, to_borrow)
+                .await
         } else {
             (
                 slot_pool
@@ -3562,7 +3727,9 @@ impl FolderDownloadManager {
             );
             for preempted_id in &preempted_backup_tasks {
                 // 暂停被抢占的备份任务
-                download_manager.handle_preempted_slot_owner(preempted_id).await;
+                download_manager
+                    .handle_preempted_slot_owner(preempted_id)
+                    .await;
             }
         }
 
@@ -3581,7 +3748,10 @@ impl FolderDownloadManager {
 
         // 🔥 获取需要恢复的子任务（暂停 + 失败），为它们分配借调位后再启动
         let tasks = download_manager.get_tasks_by_group(folder_id).await;
-        let paused_tasks: Vec<_> = tasks.iter().filter(|t| t.status == TaskStatus::Paused || t.status == TaskStatus::Failed).collect();
+        let paused_tasks: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Paused || t.status == TaskStatus::Failed)
+            .collect();
 
         // 计算可用的槽位数（固定位 + 借调位）
         let total_slots = {
@@ -3660,7 +3830,9 @@ impl FolderDownloadManager {
                 used_slot_ids.insert(slot_id);
 
                 // 更新子任务的槽位信息
-                download_manager.update_task_slot(&task.id, slot_id, is_borrowed).await;
+                download_manager
+                    .update_task_slot(&task.id, slot_id, is_borrowed)
+                    .await;
                 info!(
                     "恢复子任务 {} 分配槽位: slot_id={}, is_borrowed={}",
                     task.id, slot_id, is_borrowed
@@ -3686,9 +3858,7 @@ impl FolderDownloadManager {
 
         info!(
             "恢复文件夹 {} 完成: 启动 {} 个子任务，{} 个进入等待队列",
-            folder_id,
-            started_count,
-            pending_count
+            folder_id, started_count, pending_count
         );
 
         // 🔥 关键修复：先持久化，再发送消息
@@ -3709,7 +3879,7 @@ impl FolderDownloadManager {
 
             owner_uid: owner_uid_raw_opt,
         })
-            .await;
+        .await;
 
         // 🔥 发布恢复事件
         self.publish_event(FolderEvent::Resumed {
@@ -3717,7 +3887,7 @@ impl FolderDownloadManager {
 
             owner_uid: owner_uid_raw_opt,
         })
-            .await;
+        .await;
 
         // 如果扫描未完成，重新启动扫描
         if !folder_info.0 {
@@ -3735,7 +3905,7 @@ impl FolderDownloadManager {
                 backup_record_manager: self.backup_record_manager.clone(),
                 client_pool: self.client_pool.clone(),
                 download_manager_pool: self.download_manager_pool.clone(),
-                last_persist_at: self.last_persist_at.clone(),
+                persist_throttle: self.persist_throttle.clone(),
                 app_config: self.app_config.clone(),
             };
             let folder_id = folder_id.to_string();
@@ -3756,6 +3926,11 @@ impl FolderDownloadManager {
             if let Err(e) = self.refill_tasks(folder_id, 10).await {
                 warn!("恢复时补充任务失败: {}", e);
             }
+
+            // 🔥 对账可能补回了漏记的完成数，使文件夹其实已经全部下完：此时既没有子任务
+            //    可恢复、也没有待办可补，不会再有完成事件来驱动终态判定，文件夹会一直停在
+            //    downloading。这里主动判一次（有子任务在跑时该方法直接返回）。
+            self.finalize_folder_if_done(folder_id).await;
         }
 
         Ok(())
@@ -3871,7 +4046,7 @@ impl FolderDownloadManager {
 
             owner_uid: owner_uid_raw_opt,
         })
-            .await;
+        .await;
 
         Ok(())
     }
@@ -3894,10 +4069,7 @@ impl FolderDownloadManager {
         let count = target_ids.len();
         for id in &target_ids {
             if let Err(e) = self.cancel_folder(id, false).await {
-                warn!(
-                    "delete_folders_for_transfer: 取消文件夹 {} 失败: {}",
-                    id, e
-                );
+                warn!("delete_folders_for_transfer: 取消文件夹 {} 失败: {}", id, e);
             }
             let _ = self.delete_folder_from_history(id).await;
         }
@@ -3965,7 +4137,7 @@ impl FolderDownloadManager {
 
             owner_uid: owner_uid_raw_opt,
         })
-            .await;
+        .await;
 
         // 删除子任务的历史记录（优先从数据库删除）
         let pm_opt = self.persistence_manager.read().await.clone();
@@ -3974,7 +4146,10 @@ impl FolderDownloadManager {
             if let Some(db) = pm_guard.history_db() {
                 match db.remove_tasks_by_group(folder_id) {
                     Ok(count) if count > 0 => {
-                        info!("已从数据库删除文件夹 {} 的 {} 个子任务历史记录", folder_id, count);
+                        info!(
+                            "已从数据库删除文件夹 {} 的 {} 个子任务历史记录",
+                            folder_id, count
+                        );
                     }
                     Err(e) => {
                         error!("从数据库删除子任务历史记录失败: {}", e);
@@ -4016,44 +4191,41 @@ impl FolderDownloadManager {
     /// - 已有活跃/已恢复子任务的（`DownloadManager` 内存表）——否则会出现两个任务写同一路径
     /// - 已完成并归档到历史库的（完成后会从内存表移除，只能从历史库查）
     ///
-    /// 同时把 `completed_count` 校正到历史库的真实完成数，否则剔除文件后
-    /// `completed_count + failed_count` 永远够不到 `total_files`，文件夹到不了终态。
+    /// 同时用历史库补回快照里漏记的完成（见 `FolderDownload::merge_completed_history`），
+    /// 否则 `completed_count + failed_count` 永远够不到 `total_files`，文件夹到不了终态。
+    /// 这一步**与 pending 是否为空无关**：子任务归档在先、快照落盘在后，强杀落在两者
+    /// 之间时，丢的恰恰是 pending 早已取空、只差最后几个完成计数的文件夹。
     ///
     /// 只在恢复/继续这类低频路径调用（O(pending) 一次），不进补任务热路径。
     async fn reconcile_pending_files(&self, folder_id: &str) {
-        let (owner_uid, pending_before, has_counted) = {
+        let (owner_uid, pending_before, completed_before) = {
             let folders = self.folders.read().await;
             match folders.get(folder_id) {
-                Some(f) => (f.owner_uid, f.pending_files.len(), !f.counted_fs_ids.is_empty()),
+                Some(f) => (f.owner_uid, f.pending_files.len(), f.completed_count),
                 None => return,
             }
         };
 
-        if pending_before == 0 {
-            return;
-        }
-
-        // 1) 已有子任务承载的相对路径（活跃 + 已恢复）
+        // 1) 已有子任务承载的相对路径（活跃 + 已恢复）；pending 为空时用不上，不必查
         let mut covered: HashSet<String> = HashSet::new();
-        if let Some(dm) = self.download_manager_for(owner_uid).await {
-            for task in dm.get_tasks_by_group(folder_id).await {
-                if let Some(rp) = task.relative_path {
-                    covered.insert(rp);
+        if pending_before > 0 {
+            if let Some(dm) = self.download_manager_for(owner_uid).await {
+                for task in dm.get_tasks_by_group(folder_id).await {
+                    if let Some(rp) = task.relative_path {
+                        covered.insert(rp);
+                    }
                 }
             }
         }
 
-        // 2) 已完成并归档到历史库的相对路径
-        let mut history_completed = 0usize;
+        // 2) 已完成并归档到历史库的文件
+        let mut history = Vec::new();
         let pm_opt = self.persistence_manager.read().await.clone();
         if let Some(pm) = pm_opt {
             let pm_guard = pm.lock().await;
             if let Some(db) = pm_guard.history_db() {
-                match db.get_completed_relative_paths_by_group(folder_id) {
-                    Ok(paths) => {
-                        history_completed = paths.len();
-                        covered.extend(paths);
-                    }
+                match db.get_completed_files_by_group(folder_id) {
+                    Ok(files) => history = files,
                     Err(e) => {
                         // 查不到就退化为"只按活跃任务对账"，宁可少剔除也不误删待下载文件
                         warn!("查询文件夹 {} 已完成子任务历史失败: {}", folder_id, e);
@@ -4061,25 +4233,23 @@ impl FolderDownloadManager {
                 }
             }
         }
+        covered.extend(history.iter().map(|f| f.relative_path.clone()));
 
-        // 🔥 covered 为空不代表没事可做：counted_fs_ids 非空时仍要按 fs_id 剪一遍
-        //    （历史库被清理过、或查询失败退化时，covered 会是空的）。
-        //    全新文件夹两者都为空，仍然立即返回，保持"无额外开销"。
-        if covered.is_empty() && !has_counted {
-            return;
-        }
-
-        // 3) 剔除 + 校正完成数
-        let (removed, pending_after, completed_count) = {
+        // 3) 补回漏记的完成 + 剔除 pending
+        let (history_changed, removed, pending_after, completed_count) = {
             let mut folders = self.folders.write().await;
             let folder = match folders.get_mut(folder_id) {
                 Some(f) => f,
                 None => return,
             };
 
-            folder
-                .pending_files
-                .retain(|pf| !covered.contains(&pf.relative_path));
+            let history_changed = folder.merge_completed_history(&history);
+
+            if !covered.is_empty() {
+                folder
+                    .pending_files
+                    .retain(|pf| !covered.contains(&pf.relative_path));
+            }
 
             // 🔥 issue #156 续：再按 fs_id 剪一遍已下完的文件。
             //    上面那道按 relative_path 剪，依赖历史库里有该子任务的归档记录；
@@ -4090,21 +4260,27 @@ impl FolderDownloadManager {
 
             let pending_after = folder.pending_files.len();
             let removed = pending_before.saturating_sub(pending_after);
-
-            // 历史库的完成数是权威值（已完成子任务归档后会从内存表移除）；
-            // 取 max 防止历史被清理过导致计数倒退。
-            if (history_completed as u64) > folder.completed_count {
-                folder.completed_count = history_completed as u64;
-            }
-
-            (removed, pending_after, folder.completed_count)
+            (
+                history_changed,
+                removed,
+                pending_after,
+                folder.completed_count,
+            )
         };
 
+        if completed_count != completed_before {
+            warn!(
+                "文件夹 {} 按子任务历史补回漏记的完成数: {} → {}（上次退出时快照未及落盘）",
+                folder_id, completed_before, completed_count
+            );
+        }
         if removed > 0 {
             info!(
                 "文件夹 {} pending 对账: 剔除 {} 个已有任务/已完成的文件 ({} → {}), completed_count={}",
                 folder_id, removed, pending_before, pending_after, completed_count
             );
+        }
+        if history_changed || removed > 0 {
             self.persist_folder(folder_id).await;
         }
     }
@@ -4163,10 +4339,8 @@ impl FolderDownloadManager {
 
         // 🔥 收集所有子任务已占用的槽位（包括恢复的任务可能不在 borrowed_subtask_map 中）
         // 🔥 关键修复：使用 mut，在循环中分配槽位后需要更新此集合
-        let mut used_slot_ids: std::collections::HashSet<usize> = tasks
-            .iter()
-            .filter_map(|t| t.slot_id)
-            .collect();
+        let mut used_slot_ids: std::collections::HashSet<usize> =
+            tasks.iter().filter_map(|t| t.slot_id).collect();
 
         // 🔥 先把跑在借调位上的子任务挪回空闲的固定位（腾出借调位），
         //    再归还这一轮用不上的借调位，最后才判断要不要补任务
@@ -4239,7 +4413,12 @@ impl FolderDownloadManager {
             if files.is_empty() {
                 return Ok(RefillBatch::default());
             }
-            (files, folder.local_root.clone(), folder.remote_root.clone(), folder.owner_uid)
+            (
+                files,
+                folder.local_root.clone(),
+                folder.remote_root.clone(),
+                folder.owner_uid,
+            )
         };
 
         if files_to_create.is_empty() {
@@ -4342,7 +4521,7 @@ impl FolderDownloadManager {
                             &pending_file.relative_path,
                             folder_owner_uid,
                         )
-                            .await;
+                        .await;
                         continue; // 跳过此文件，继续下一个
                     }
                     Ok(crate::uploader::conflict::ConflictResolution::UseNewPath(new_path)) => {
@@ -4383,11 +4562,11 @@ impl FolderDownloadManager {
                 match folders_guard.get(folder_id) {
                     Some(folder) => match folder.fixed_slot_id {
                         Some(fixed_slot_id)
-                        if !used_slot_ids.contains(&fixed_slot_id)
-                            && folder.fixed_slot_subtask.is_none() =>
-                            {
-                                Some(fixed_slot_id)
-                            }
+                            if !used_slot_ids.contains(&fixed_slot_id)
+                                && folder.fixed_slot_subtask.is_none() =>
+                        {
+                            Some(fixed_slot_id)
+                        }
                         _ => None,
                     },
                     None => None,
@@ -4422,7 +4601,8 @@ impl FolderDownloadManager {
                         let mut found_slot = None;
                         for &slot_id in &folder.borrowed_slot_ids {
                             // 🔥 关键修复：既要检查 borrowed_subtask_map，也要检查 used_slot_ids
-                            let in_map = folder.borrowed_subtask_map.values().any(|&s| s == slot_id);
+                            let in_map =
+                                folder.borrowed_subtask_map.values().any(|&s| s == slot_id);
                             let in_use = used_slot_ids.contains(&slot_id);
                             if !in_map && !in_use {
                                 // 找到一个真正空闲的借调位
@@ -4438,7 +4618,8 @@ impl FolderDownloadManager {
                             drop(folders_guard);
 
                             // 登记借调位映射
-                            self.register_subtask_borrowed_slot(folder_id, &task.id, slot_id).await;
+                            self.register_subtask_borrowed_slot(folder_id, &task.id, slot_id)
+                                .await;
 
                             // 🔥 关键修复：将分配的槽位加入已使用集合，防止后续任务重复分配
                             used_slot_ids.insert(slot_id);
@@ -4619,9 +4800,10 @@ impl FolderDownloadManager {
             }
         };
         if let Some(dm) = self.download_manager_for(owner_uid).await {
-            let has_active = dm.get_tasks_by_group(folder_id).await.iter().any(|t| {
-                t.status == TaskStatus::Downloading || t.status == TaskStatus::Pending
-            });
+            let has_active =
+                dm.get_tasks_by_group(folder_id).await.iter().any(|t| {
+                    t.status == TaskStatus::Downloading || t.status == TaskStatus::Pending
+                });
             if has_active {
                 return;
             }
@@ -4636,7 +4818,7 @@ impl FolderDownloadManager {
                 if folder.scan_completed
                     && folder.pending_files.is_empty()
                     && (folder.completed_count + folder.skipped_count + folder.failed_count)
-                    >= folder.total_files
+                        >= folder.total_files
                     && folder.status != FolderStatus::Completed
                     && folder.status != FolderStatus::Failed
                     && folder.status != FolderStatus::Cancelled
@@ -4646,7 +4828,10 @@ impl FolderDownloadManager {
                         folder.mark_failed(format!("{} 个文件下载失败", folder.failed_count));
                         info!(
                             "文件夹 {} 下载完成但有 {} 个失败 (completed={}, failed={})",
-                            folder.name, folder.failed_count, folder.completed_count, folder.failed_count
+                            folder.name,
+                            folder.failed_count,
+                            folder.completed_count,
+                            folder.failed_count
                         );
                     } else {
                         folder.mark_completed();
@@ -4664,6 +4849,15 @@ impl FolderDownloadManager {
 
         // 终态时更新持久化文件
         self.persist_folder(folder_id).await;
+
+        // 🔥 终态文件夹不再需要槽位，必须归还（与完成监听器里的终态分支一致）。
+        //    恢复路径（`resume_folder`）在判终态之前刚给文件夹分配过固定位 + 借调位，
+        //    不还的话这些槽位会被一个已完成的文件夹永久占着，同账号别的下载全部排队。
+        //    上面已确认没有子任务在跑，可以整组释放。
+        self.release_folder_slots(folder_id).await;
+        if let Some(dm) = self.download_manager_for(owner_uid).await {
+            dm.try_start_waiting_tasks().await;
+        }
 
         // 🔥 清理取消令牌，避免内存泄漏
         self.cancellation_tokens.write().await.remove(folder_id);
@@ -4690,7 +4884,7 @@ impl FolderDownloadManager {
 
                 owner_uid: owner_uid_raw_opt,
             })
-                .await;
+            .await;
         }
 
         // 🔥 根据实际状态发布对应事件
@@ -4701,11 +4895,12 @@ impl FolderDownloadManager {
 
                 owner_uid: owner_uid_raw_opt,
             })
-                .await;
+            .await;
         } else if new_status == "failed" {
             let error_msg = {
                 let folders = self.folders.read().await;
-                folders.get(folder_id)
+                folders
+                    .get(folder_id)
                     .and_then(|f| f.error.clone())
                     .unwrap_or_default()
             };
@@ -4715,7 +4910,7 @@ impl FolderDownloadManager {
 
                 owner_uid: owner_uid_raw_opt,
             })
-                .await;
+            .await;
         }
     }
 
@@ -5004,14 +5199,10 @@ impl FolderDownloadManager {
 
         let folders_guard = self.folders.read().await;
         let folder = folders_guard.get(folder_id)?;
-        folder
-            .borrowed_slot_ids
-            .iter()
-            .copied()
-            .find(|slot_id| {
-                !folder.borrowed_subtask_map.values().any(|s| s == slot_id)
-                    && !slots_in_use.contains(slot_id)
-            })
+        folder.borrowed_slot_ids.iter().copied().find(|slot_id| {
+            !folder.borrowed_subtask_map.values().any(|s| s == slot_id)
+                && !slots_in_use.contains(slot_id)
+        })
     }
 
     /// 🔥 为排队中的文件夹子任务取得一个**借调位**
@@ -5069,7 +5260,10 @@ impl FolderDownloadManager {
                     folder.borrowed_slot_ids.push(sid);
                 }
                 slot_id = Some(sid);
-                info!("文件夹 {} 为排队子任务补借 1 个任务位: slot_id={}", folder_id, sid);
+                info!(
+                    "文件夹 {} 为排队子任务补借 1 个任务位: slot_id={}",
+                    folder_id, sid
+                );
             }
         }
 
@@ -5260,10 +5454,7 @@ impl FolderDownloadManager {
         // 释放到任务位池
         slot_pool.release_borrowed_slot(&folder_id, slot_id).await;
 
-        info!(
-            "回收完成：释放借调位 {} 从文件夹 {}",
-            slot_id, folder_id
-        );
+        info!("回收完成：释放借调位 {} 从文件夹 {}", slot_id, folder_id);
 
         // 🔥 关键修复：将被暂停的子任务重新加入等待队列
         // 子任务不应该一直暂停，而是重新排队等待后续有空闲槽位时继续下载
@@ -5312,7 +5503,9 @@ impl FolderDownloadManager {
     ) {
         let mut folders_guard = self.folders.write().await;
         if let Some(folder) = folders_guard.get_mut(folder_id) {
-            folder.borrowed_subtask_map.insert(task_id.to_string(), slot_id);
+            folder
+                .borrowed_subtask_map
+                .insert(task_id.to_string(), slot_id);
             info!(
                 "注册子任务借调位: folder={}, task={}, slot={}",
                 folder_id, task_id, slot_id
@@ -5408,7 +5601,10 @@ impl FolderDownloadManager {
         }
 
         if let Some(preempted_id) = preempted {
-            info!("文件夹 {} 补发固定位时抢占了槽位持有者 {}", folder_id, preempted_id);
+            info!(
+                "文件夹 {} 补发固定位时抢占了槽位持有者 {}",
+                folder_id, preempted_id
+            );
             dm.handle_preempted_slot_owner(&preempted_id).await;
         }
 
@@ -5511,9 +5707,7 @@ impl FolderDownloadManager {
     /// [`Self::set_fixed_slot_subtask`] 登记占用关系。
     pub async fn folder_fixed_slot_id(&self, folder_id: &str) -> Option<usize> {
         let folders_guard = self.folders.read().await;
-        folders_guard
-            .get(folder_id)
-            .and_then(|f| f.fixed_slot_id)
+        folders_guard.get(folder_id).and_then(|f| f.fixed_slot_id)
     }
 
     /// 🔥 幂等登记子任务对文件夹固定槽位的占用
@@ -5567,10 +5761,7 @@ impl FolderDownloadManager {
         if let Some(folder) = folders_guard.get_mut(folder_id) {
             if folder.fixed_slot_subtask.as_deref() == Some(task_id) {
                 folder.fixed_slot_subtask = None;
-                info!(
-                    "释放文件夹固定槽位: folder={}, task={}",
-                    folder_id, task_id
-                );
+                info!("释放文件夹固定槽位: folder={}, task={}", folder_id, task_id);
             }
         }
     }
@@ -5673,7 +5864,10 @@ impl FolderDownloadManager {
             }
         }
 
-        info!("释放文件夹 {} 的所有槽位（per-folder 层：owner=folder_id 的槽位 + 文件夹端总映射）", folder_id);
+        info!(
+            "释放文件夹 {} 的所有槽位（per-folder 层：owner=folder_id 的槽位 + 文件夹端总映射）",
+            folder_id
+        );
     }
 
     /// 🔥 重命名加密文件夹并更新路径
@@ -5684,8 +5878,13 @@ impl FolderDownloadManager {
         // 获取映射和 local_root
         let (mappings, local_root) = {
             let folders = self.folders.read().await;
-            let folder = folders.get(folder_id).ok_or_else(|| anyhow!("文件夹不存在"))?;
-            (folder.encrypted_folder_mappings.clone(), folder.local_root.clone())
+            let folder = folders
+                .get(folder_id)
+                .ok_or_else(|| anyhow!("文件夹不存在"))?;
+            (
+                folder.encrypted_folder_mappings.clone(),
+                folder.local_root.clone(),
+            )
         };
 
         if mappings.is_empty() {
@@ -5720,7 +5919,10 @@ impl FolderDownloadManager {
                 info!("目标文件夹已存在，将合并: {:?}", decrypted_path);
                 // 移动加密文件夹内的所有内容到解密文件夹
                 if let Err(e) = self.merge_folders(&encrypted_path, &decrypted_path).await {
-                    warn!("合并文件夹失败: {:?} -> {:?}, 错误: {}", encrypted_path, decrypted_path, e);
+                    warn!(
+                        "合并文件夹失败: {:?} -> {:?}, 错误: {}",
+                        encrypted_path, decrypted_path, e
+                    );
                     continue;
                 }
             } else {
@@ -5734,12 +5936,18 @@ impl FolderDownloadManager {
 
                 // 重命名文件夹
                 if let Err(e) = tokio::fs::rename(&encrypted_path, &decrypted_path).await {
-                    warn!("重命名文件夹失败: {:?} -> {:?}, 错误: {}", encrypted_path, decrypted_path, e);
+                    warn!(
+                        "重命名文件夹失败: {:?} -> {:?}, 错误: {}",
+                        encrypted_path, decrypted_path, e
+                    );
                     continue;
                 }
             }
 
-            info!("重命名加密文件夹成功: {:?} -> {:?}", encrypted_path, decrypted_path);
+            info!(
+                "重命名加密文件夹成功: {:?} -> {:?}",
+                encrypted_path, decrypted_path
+            );
             successful_renames.push((encrypted_rel, decrypted_rel));
         }
 
@@ -5751,8 +5959,11 @@ impl FolderDownloadManager {
                     for (encrypted_rel, decrypted_rel) in &successful_renames {
                         // 替换路径中的加密部分
                         if pending_file.relative_path.starts_with(encrypted_rel) {
-                            let new_path = pending_file.relative_path
-                                .replacen(encrypted_rel, decrypted_rel, 1);
+                            let new_path = pending_file.relative_path.replacen(
+                                encrypted_rel,
+                                decrypted_rel,
+                                1,
+                            );
                             info!(
                                 "更新 pending_file 路径: {} -> {}",
                                 pending_file.relative_path, new_path
@@ -5835,25 +6046,32 @@ mod tests {
         }
 
         assert!(
-            !fm.try_allocate_fixed_slot_for_subtask(&slotless_id, "child-1").await,
+            !fm.try_allocate_fixed_slot_for_subtask(&slotless_id, "child-1")
+                .await,
             "文件夹自己没有 fixed_slot_id，不能把固定槽位发给子任务"
         );
         // 拒绝之后不能留下占用痕迹，否则真拿到槽位时会误判为「已被占用」
         {
             let folders = fm.folders.read().await;
             assert!(
-                folders.get(&slotless_id).unwrap().fixed_slot_subtask.is_none(),
+                folders
+                    .get(&slotless_id)
+                    .unwrap()
+                    .fixed_slot_subtask
+                    .is_none(),
                 "拒绝发放后不应登记 fixed_slot_subtask"
             );
         }
 
         // 对照：持有槽位的文件夹正常发放，且只发一次
         assert!(
-            fm.try_allocate_fixed_slot_for_subtask(&holder_id, "child-2").await,
+            fm.try_allocate_fixed_slot_for_subtask(&holder_id, "child-2")
+                .await,
             "文件夹持有 fixed_slot_id 时应正常发放"
         );
         assert!(
-            !fm.try_allocate_fixed_slot_for_subtask(&holder_id, "child-3").await,
+            !fm.try_allocate_fixed_slot_for_subtask(&holder_id, "child-3")
+                .await,
             "固定位已被占用，不能重复发放给第二个子任务"
         );
     }
@@ -5956,7 +6174,11 @@ mod tests {
 
         let folders = fm.folders.read().await;
         assert!(
-            folders.get(&folder_id).unwrap().borrowed_slot_ids.is_empty(),
+            folders
+                .get(&folder_id)
+                .unwrap()
+                .borrowed_slot_ids
+                .is_empty(),
             "只有 1 个文件的文件夹不该继续占着 4 个借调位（固定位已够用）"
         );
     }
@@ -6096,7 +6318,8 @@ mod tests {
         }
 
         assert_eq!(
-            fm.acquire_borrowed_slot_for_subtask(&folder_id, "sub").await,
+            fm.acquire_borrowed_slot_for_subtask(&folder_id, "sub")
+                .await,
             None
         );
     }
@@ -6143,7 +6366,8 @@ mod tests {
     async fn test_no_fixed_slot_grant_for_unknown_folder() {
         let fm = FolderDownloadManager::new(PathBuf::from("."));
         assert!(
-            !fm.try_allocate_fixed_slot_for_subtask("nonexistent", "child").await
+            !fm.try_allocate_fixed_slot_for_subtask("nonexistent", "child")
+                .await
         );
     }
 }
@@ -6256,8 +6480,8 @@ mod priority_tests {
                 true,
                 folder_slot_priority(Some("share-sync:sub-2")),
             )
-                .await
-                .is_none(),
+            .await
+            .is_none(),
             "后台文件夹不得抢占正在跑的后台下载"
         );
         // 借调路径也不能成为绕过优先级的后门
@@ -6269,7 +6493,9 @@ mod priority_tests {
         );
         // 槽位仍归原任务
         assert_eq!(
-            pool.get_task_slot("share-sync-file").await.map(|(id, _)| id),
+            pool.get_task_slot("share-sync-file")
+                .await
+                .map(|(id, _)| id),
             Some(0)
         );
 

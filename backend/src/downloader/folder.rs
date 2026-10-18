@@ -334,6 +334,48 @@ impl FolderDownload {
         before - self.pending_files.len()
     }
 
+    /// 用子任务历史补回快照里漏记的完成，返回快照是否因此变化
+    ///
+    /// 子任务完成时先删 WAL、归档进历史库，之后文件夹才在内存里 +1，快照落盘还要再晚
+    /// 一点（节流）。进程在这之间被强杀，重启后这几个文件两头都找不到：下载管理器里
+    /// 已经没有任务，快照的 `completed_count` / `counted_fs_ids` 也没记上。文件夹
+    /// 永远凑不满 `total_files`，停在 downloading —— 依赖它收尾的分享同步续跑接管
+    /// 也就一直挂着（实测 6 个文件下完 5 个后被杀，重启后只认 2 个，最终卡在 3/6）。
+    ///
+    /// 完成数取三者最大值，不做加法：
+    /// - 快照自己的 `completed_count`；
+    /// - `counted_fs_ids` 与历史 fs_id 的并集大小 —— 历史库按天清理，老的完成记录可能
+    ///   已经没了，但快照里还记着，取并集两边都不丢；
+    /// - 历史里的文件数 —— 兜住 fs_id 缺失的记录，以及 `counted_fs_ids` 还没持久化
+    ///   时写下的老快照（那时只有 `completed_count`，fs_id 集合是空的）。
+    pub fn merge_completed_history(
+        &mut self,
+        files: &[crate::persistence::history_db::CompletedGroupFile],
+    ) -> bool {
+        if files.is_empty() {
+            return false;
+        }
+        let counted_before = self.counted_fs_ids.len();
+        let completed_before = self.completed_count;
+
+        self.counted_fs_ids
+            .extend(files.iter().filter_map(|f| f.fs_id));
+        let floor = (self.counted_fs_ids.len() as u64).max(files.len() as u64);
+        self.completed_count = self.completed_count.max(floor);
+
+        // 已下载字节同理补齐，否则文件夹完成了进度条还停在漏记前的位置
+        let history_bytes: u64 = files.iter().map(|f| f.file_size).sum();
+        self.completed_downloaded_size = self.completed_downloaded_size.max(history_bytes);
+        let floor_bytes = if self.total_size > 0 {
+            self.completed_downloaded_size.min(self.total_size)
+        } else {
+            self.completed_downloaded_size
+        };
+        self.downloaded_size = self.downloaded_size.max(floor_bytes);
+
+        self.completed_count != completed_before || self.counted_fs_ids.len() != counted_before
+    }
+
     pub fn mark_downloading(&mut self) {
         self.status = FolderStatus::Downloading;
         if self.started_at.is_none() {
@@ -621,5 +663,94 @@ mod tests {
         let tasks = [("task-A", 50u64), ("task-B", 80u64)];
         let active = folder.active_downloaded_excluding_counted(tasks.iter().copied());
         assert_eq!(active, 130);
+    }
+
+    fn done(
+        rel: &str,
+        fs_id: Option<u64>,
+        size: u64,
+    ) -> crate::persistence::history_db::CompletedGroupFile {
+        crate::persistence::history_db::CompletedGroupFile {
+            relative_path: rel.to_string(),
+            fs_id,
+            file_size: size,
+        }
+    }
+
+    /// 回归 2026-10-18 本地复现：6 个文件下完 5 个后被强杀，快照只记了 2 个。
+    /// 历史库里有 5 条完成记录，恢复时必须据此补回，否则文件夹卡在 3/6 永远收不了尾。
+    #[test]
+    fn test_merge_completed_history_recovers_lost_completions() {
+        let mut folder = FolderDownload::new("/d".to_string(), PathBuf::from("./d"));
+        folder.total_files = 6;
+        folder.total_size = 600;
+        folder.completed_count = 2;
+        folder.counted_fs_ids.extend([1, 2]);
+        folder.completed_downloaded_size = 200;
+        folder.downloaded_size = 250;
+
+        let history: Vec<_> = (1..=5)
+            .map(|i| done(&format!("{}.mp4", i), Some(i), 100))
+            .collect();
+        assert!(folder.merge_completed_history(&history));
+
+        assert_eq!(folder.completed_count, 5, "漏记的 3 个完成必须补回");
+        assert_eq!(
+            folder.counted_fs_ids.len(),
+            5,
+            "补回的文件要登记 fs_id，防止重复计数/重下"
+        );
+        assert_eq!(folder.completed_downloaded_size, 500);
+        assert_eq!(folder.downloaded_size, 500);
+
+        // 再合并一次是幂等的
+        assert!(!folder.merge_completed_history(&history));
+        assert_eq!(folder.completed_count, 5);
+    }
+
+    /// 历史库按天清理：老的完成记录没了，但快照里记着。取并集，两边都不能丢。
+    #[test]
+    fn test_merge_completed_history_unions_with_snapshot() {
+        let mut folder = FolderDownload::new("/d".to_string(), PathBuf::from("./d"));
+        folder.completed_count = 3;
+        folder.counted_fs_ids.extend([1, 2, 3]);
+
+        // 1、2 的历史已被清理；3 还在；4 是快照漏记的
+        let history = vec![done("3.mp4", Some(3), 10), done("4.mp4", Some(4), 10)];
+        assert!(folder.merge_completed_history(&history));
+        assert_eq!(
+            folder.completed_count, 4,
+            "应为 {{1,2,3}} ∪ {{3,4}} 共 4 个"
+        );
+    }
+
+    /// 老快照没有持久化 counted_fs_ids：完成数只能和历史条数取最大，不能相加，
+    /// 否则同一批文件被算两遍。
+    #[test]
+    fn test_merge_completed_history_does_not_double_count_legacy_snapshot() {
+        let mut folder = FolderDownload::new("/d".to_string(), PathBuf::from("./d"));
+        folder.completed_count = 3;
+
+        let history: Vec<_> = (1..=3)
+            .map(|i| done(&format!("{}.mp4", i), Some(i), 10))
+            .collect();
+        assert!(
+            folder.merge_completed_history(&history),
+            "fs_id 补登记算变化"
+        );
+        assert_eq!(folder.completed_count, 3);
+    }
+
+    /// 历史记录缺 fs_id 时按条数兜底；空历史什么都不动。
+    #[test]
+    fn test_merge_completed_history_without_fs_id_and_empty() {
+        let mut folder = FolderDownload::new("/d".to_string(), PathBuf::from("./d"));
+        folder.completed_count = 1;
+        assert!(!folder.merge_completed_history(&[]));
+
+        let history = vec![done("a.bin", None, 10), done("b.bin", None, 10)];
+        assert!(folder.merge_completed_history(&history));
+        assert_eq!(folder.completed_count, 2);
+        assert!(folder.counted_fs_ids.is_empty());
     }
 }

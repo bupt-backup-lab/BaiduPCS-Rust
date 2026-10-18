@@ -3217,6 +3217,11 @@ impl AppState {
             info!("分享同步管理器已停止");
         }
 
+        // 文件夹快照有节流落盘，退出前把被节流挡下的欠账写掉，
+        // 否则最后几秒完成的文件会在重启后从文件夹计数里消失
+        self.folder_download_manager.flush_dirty_folders(true).await;
+        info!("文件夹快照已刷写");
+
         // 关闭持久化管理器
         let mut pm = self.persistence_manager.lock().await;
         pm.shutdown().await;
