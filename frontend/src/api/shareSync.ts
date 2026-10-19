@@ -7,7 +7,7 @@ import { rawApiClient } from './client'
 // ==================== 类型定义 ====================
 
 export type ConflictStrategy = 'overwrite' | 'versioned' | 'skip'
-export type PollMode = 'disabled' | 'interval' | 'scheduled'
+export type PollMode = 'disabled' | 'interval' | 'scheduled' | 'cron'
 export type TargetKind = 'netdisk' | 'local' | 'netdisk_and_local'
 
 /**
@@ -40,6 +40,20 @@ export interface PollConfig {
   interval_secs: number
   schedule_hour?: number | null
   schedule_minute?: number | null
+  /** cron 表达式（mode=cron 时必填）：分 时 日 月 星期，按服务器时区 */
+  cron_expr?: string | null
+}
+
+export interface CronPreview {
+  /** 语法合法且满足最小轮询间隔，可直接保存 */
+  valid: boolean
+  /** 中文描述（语法合法即返回） */
+  description?: string
+  error?: string
+  /** 接下来的触发时刻（服务器时区，YYYY-MM-DD HH:MM） */
+  next_runs: string[]
+  /** 服务器时区相对 UTC 的偏移分钟数 */
+  utc_offset_minutes: number
 }
 
 export interface ShareSubscription {
@@ -374,6 +388,17 @@ export interface PreviewTreeResponse {
   root: TreeNode[]
   short_key: string
   shareid: string
+}
+
+/**
+ * 解释 cron 表达式：中文描述 + 接下来几次触发时间（服务器时区）
+ */
+export async function previewCron(expr: string, count = 5): Promise<CronPreview> {
+  const r = await rawApiClient.post<{ success: boolean; data: CronPreview }>(
+      `${BASE}/cron/preview`,
+      { expr, count }
+  )
+  return r.data.data
 }
 
 /**

@@ -26,6 +26,8 @@ services:
     environment:
       - RUST_LOG=info
       - RUST_BACKTRACE=1
+      # 时区：分享同步的「每日定时 / Cron 表达式」按此时区计算，未设置时为 UTC
+      # - TZ=Asia/Shanghai
     restart: unless-stopped
     networks:
       - baidu-network

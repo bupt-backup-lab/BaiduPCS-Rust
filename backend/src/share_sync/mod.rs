@@ -7,6 +7,7 @@
 //! 网盘目录和/或本地目录。
 
 pub mod config;
+pub mod cron;
 pub mod diff;
 pub mod error;
 pub mod events;
@@ -21,9 +22,11 @@ pub mod tree;
 pub mod types;
 
 pub use config::{
-    CreateShareSubscriptionRequest, LocalSyncMode, LocalTarget, NetdiskTarget, PollConfig,
-    ShareSubscription, SyncTarget, UpdateShareSubscriptionRequest, MIN_POLL_INTERVAL_SECS,
+    parse_poll_cron, CreateShareSubscriptionRequest, LocalSyncMode, LocalTarget, NetdiskTarget,
+    PollConfig, PollSchedule, ShareSubscription, SyncTarget, UpdateShareSubscriptionRequest,
+    MIN_POLL_INTERVAL_SECS,
 };
+pub use cron::CronSchedule;
 pub use diff::{diff_snapshots, DiffSummaryView, ShareDiff, ShareModifiedItem};
 pub use error::{ErrorCategory, ShareSyncError};
 pub use events::{ShareSyncEvent, ShareSyncEventPublisher};

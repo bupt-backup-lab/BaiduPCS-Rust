@@ -85,7 +85,14 @@
                 maxlength="60"
             />
           </el-form-item>
-          <el-form-item label="轮询间隔">
+          <el-form-item label="轮询">
+            <el-radio-group v-model="form.syncPollMode" class="poll-mode-group">
+              <el-radio-button value="interval">固定间隔</el-radio-button>
+              <el-radio-button value="scheduled">每日定时</el-radio-button>
+              <el-radio-button value="cron">Cron 表达式</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="form.syncPollMode === 'interval'" label="轮询间隔">
             <el-input-number
                 v-model="form.syncIntervalSecs"
                 :min="600"
@@ -93,6 +100,17 @@
                 :step="300"
             />
             <span class="switch-tip">秒（最小 600 = 10 分钟）</span>
+          </el-form-item>
+          <el-form-item v-if="form.syncPollMode === 'scheduled'" label="时刻">
+            <el-time-picker
+                v-model="form.syncScheduledTime"
+                format="HH:mm"
+                value-format="HH:mm"
+                :clearable="false"
+            />
+          </el-form-item>
+          <el-form-item v-if="form.syncPollMode === 'cron'" label="表达式">
+            <CronExprEditor ref="cronEditorRef" v-model="form.syncCronExpr" />
           </el-form-item>
           <el-form-item label="同步范围">
             <ShareIncludeExcludeEditor
@@ -240,6 +258,7 @@ import { useIsMobile } from '@/utils/responsive'
 import NetdiskPathSelector from './NetdiskPathSelector.vue'
 import ShareFileSelector from './ShareFileSelector.vue'
 import ShareIncludeExcludeEditor from './ShareIncludeExcludeEditor.vue'
+import CronExprEditor from './CronExprEditor.vue'
 import { FilePickerModal } from '@/components/FilePicker'
 
 // 响应式检测
@@ -260,7 +279,12 @@ import {
   type TransferConfig,
   type DownloadConfig
 } from '@/api/config'
-import { createSubscription, type CreateShareSubscriptionRequest, type SyncTarget } from '@/api/shareSync'
+import {
+  createSubscription,
+  type CreateShareSubscriptionRequest,
+  type PollConfig,
+  type SyncTarget,
+} from '@/api/shareSync'
 import { useAuthStore } from '@/stores/auth'
 
 const authStore = useAuthStore()
@@ -299,6 +323,10 @@ const form = reactive({
   keepSync: false,
   syncName: '',
   syncIntervalSecs: 1800,
+  // 轮询方式：固定间隔（默认）/ 每日定时 / cron 表达式
+  syncPollMode: 'interval' as 'interval' | 'scheduled' | 'cron',
+  syncScheduledTime: '03:00',
+  syncCronExpr: '',
   includePaths: [] as string[],
   excludePatterns: [] as string[],
   // 订阅目标开关（至少开一个）：转存到网盘 / 同步到本地
@@ -398,6 +426,9 @@ async function handleOpen() {
   form.keepSync = props.lockKeepSync ? true : (props.defaultKeepSync ?? false)
   form.syncName = ''
   form.syncIntervalSecs = 1800
+  form.syncPollMode = 'interval'
+  form.syncScheduledTime = '03:00'
+  form.syncCronExpr = ''
   form.includePaths = []
   form.excludePatterns = []
 
@@ -448,6 +479,9 @@ function handleClose() {
   form.keepSync = false
   form.syncName = ''
   form.syncIntervalSecs = 1800
+  form.syncPollMode = 'interval'
+  form.syncScheduledTime = '03:00'
+  form.syncCronExpr = ''
   form.includePaths = []
   form.excludePatterns = []
   form.syncToNetdisk = true
@@ -553,6 +587,47 @@ function handlePreviewError(error: any) {
   }
 }
 
+// cron 编辑器（提交前用其预览结果拦截已知无效的表达式）
+const cronEditorRef = ref<InstanceType<typeof CronExprEditor> | null>(null)
+
+// 按所选轮询方式构造 poll_config；校验失败时提示并返回 null
+function buildSyncPollConfig(): PollConfig | null {
+  const interval = Number(form.syncIntervalSecs)
+  const intervalSecs = Number.isFinite(interval) ? Math.max(600, interval) : 1800
+  const base = {
+    enabled: true,
+    interval_secs: intervalSecs,
+    schedule_hour: null,
+    schedule_minute: null,
+    cron_expr: null,
+  }
+  if (form.syncPollMode === 'scheduled') {
+    const [h = 3, m = 0] = (form.syncScheduledTime || '03:00').split(':').map(Number)
+    return {
+      ...base,
+      mode: 'scheduled',
+      schedule_hour: Number.isFinite(h) ? Math.min(23, Math.max(0, h)) : 3,
+      schedule_minute: Number.isFinite(m) ? Math.min(59, Math.max(0, m)) : 0,
+    }
+  }
+  if (form.syncPollMode === 'cron') {
+    const expr = form.syncCronExpr.trim()
+    const reason = expr
+      ? cronEditorRef.value?.invalidReason(expr) ?? null
+      : '请填写 cron 表达式'
+    if (reason) {
+      ElMessage.error(reason)
+      return null
+    }
+    return { ...base, mode: 'cron', cron_expr: expr }
+  }
+  if (!Number.isFinite(interval) || interval < 600) {
+    ElMessage.error('轮询间隔不能小于 600 秒')
+    return null
+  }
+  return { ...base, mode: 'interval' }
+}
+
 // 保持同步：创建订阅（而非一次性转存）
 // include_paths / exclude_patterns 由 ShareIncludeExcludeEditor 收集，
 // 其树选择器产出的是“分享根相对路径”命名空间（与后端 snapshot 匹配一致），
@@ -566,9 +641,8 @@ async function createSyncSubscription() {
   }
 
   const name = form.syncName.trim()
-  const interval = Number(form.syncIntervalSecs)
-  if (!Number.isFinite(interval) || interval < 600) {
-    ElMessage.error('轮询间隔不能小于 600 秒')
+  const pollConfig = buildSyncPollConfig()
+  if (!pollConfig) {
     return
   }
   if (!form.syncToNetdisk && !form.syncToLocal) {
@@ -590,13 +664,7 @@ async function createSyncSubscription() {
       include_paths: form.includePaths,
       exclude_patterns: form.excludePatterns,
       targets: buildSyncTargets(),
-      poll_config: {
-        enabled: true,
-        mode: 'interval',
-        interval_secs: interval,
-        schedule_hour: null,
-        schedule_minute: null,
-      },
+      poll_config: pollConfig,
       // 显式归属当前活跃账号（缺省由后端回退）
       owner_uid: authStore.activeUid ?? undefined,
     }
@@ -806,6 +874,10 @@ watch(() => form.password, () => {
   :deep(.el-input__wrapper) {
     box-shadow: 0 0 0 1px var(--el-color-danger) inset;
   }
+}
+
+.poll-mode-group {
+  flex-wrap: wrap;
 }
 
 .switch-tip {

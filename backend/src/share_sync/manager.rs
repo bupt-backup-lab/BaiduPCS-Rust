@@ -29,7 +29,7 @@ use crate::share_sync::persistence::{
     ShareSyncPersistence, RUN_PHASE_DIFFING, RUN_PHASE_EXECUTING, RUN_PHASE_SCANNING,
 };
 use crate::share_sync::resolver::ShareSyncAccountResolver;
-use crate::share_sync::scheduler::SubscriptionScheduler;
+use crate::share_sync::scheduler::{describe_schedule, SubscriptionScheduler};
 use crate::share_sync::snapshot::{
     CapturedShare, ScanCache, ScanProgressSink, ShareSnapshot, ShareSnapshotItem, SnapshotCollector,
 };
@@ -1960,14 +1960,14 @@ impl ShareSyncManager {
     // ===================================================
 
     fn start_scheduler_for(self: &Arc<Self>, sub: &ShareSubscription) {
-        let interval = sub.poll_config.effective_interval_secs();
-        if interval == 0 {
+        let Some(schedule) = sub.poll_config.schedule() else {
             return;
-        }
+        };
         if self.schedulers.contains_key(&sub.id) {
             return;
         }
-        let mut sched = SubscriptionScheduler::new(sub.id.clone(), interval);
+        let schedule_desc = describe_schedule(&schedule);
+        let mut sched = SubscriptionScheduler::new(sub.id.clone(), schedule);
         let mgr = Arc::clone(self);
         let sub_id = sub.id.clone();
         sched.start(move |id| {
@@ -1977,7 +1977,7 @@ impl ShareSyncManager {
                 mgr2.execute_one(&id).await.map(|_| ())
             }
         });
-        info!("scheduler: 启动订阅 {} (interval={}s)", sub_id, interval);
+        info!("scheduler: 启动订阅 {} ({})", sub_id, schedule_desc);
         self.schedulers.insert(sub.id.clone(), sched);
     }
 
