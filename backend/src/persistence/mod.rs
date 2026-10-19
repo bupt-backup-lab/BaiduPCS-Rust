@@ -84,10 +84,9 @@ pub use manager::PersistenceManager;
 
 // 导出恢复模块
 pub use recovery::{
-    cleanup_completed_tasks, cleanup_completed_tasks_with_db, cleanup_expired_tasks,
-    classify_recovery_branch, cleanup_invalid_tasks, scan_recoverable_tasks,
-    DownloadRecoveryInfo, RecoveredTask, RecoveryBranch, RecoveryScanResult,
-    TransferRecoveryInfo, UploadRecoveryInfo,
+    classify_recovery_branch, cleanup_completed_tasks, cleanup_completed_tasks_with_db,
+    cleanup_expired_tasks, cleanup_invalid_tasks, scan_recoverable_tasks, DownloadRecoveryInfo,
+    RecoveredTask, RecoveryBranch, RecoveryScanResult, TransferRecoveryInfo, UploadRecoveryInfo,
 };
 
 // 导出历史归档模块
@@ -114,4 +113,7 @@ pub use migration::{
 };
 
 // 导出迁移前完整备份
-pub use backup::{create_pre_migration_backup, needs_pre_migration_backup, PreMigrationBackup};
+pub use backup::{
+    create_pre_migration_backup, ensure_backup_version_recorded, needs_pre_migration_backup,
+    PreMigrationBackup,
+};

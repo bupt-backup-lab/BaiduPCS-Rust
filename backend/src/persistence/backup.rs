@@ -11,6 +11,9 @@
 //!   - DB 路径**按 `AppConfig.persistence.db_path` 取真实值**，不写死。
 //!   - 备份**失败仅告警、不阻塞启动**（不抛错），避免把可恢复的小问题升级成启动失败；
 //!     真正的破坏性写入若随后失败，会另行进入只读保护模式。
+//!   - **每个程序版本备份一次**：以 `config/backups/.last_backup_version` 记录已为哪个
+//!     版本做过迁移前备份，版本变化（升级 / 降级）即重新备份；新备份成功后只保留最近
+//!     [`PRE_MIGRATION_KEEP`] 份，避免无限堆积。
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -30,54 +33,172 @@ pub const PRE_MIGRATION_FILES: &[&str] = &[
 /// 据此判断一个 `pre_migration_*` 目录是否为**有效**（完整）备份。
 const BACKUP_MANIFEST: &str = "backup_manifest.json";
 
+/// 版本标记文件名（位于 `config/backups/` 下），内容为最近一次**成功**完成迁移前
+/// 备份（或确认为全新安装）时的程序版本号。
+const VERSION_MARKER: &str = ".last_backup_version";
+
+/// 迁移前备份目录名前缀。
+const BACKUP_DIR_PREFIX: &str = "pre_migration_";
+
+/// 备份目录名中的时间戳格式（定长，字典序即时间序）。
+const BACKUP_TS_FORMAT: &str = "%Y%m%d_%H%M%S";
+
+/// 新备份成功后保留的有效迁移前备份份数（含刚创建的这份）。
+const PRE_MIGRATION_KEEP: usize = 3;
+
 /// 是否需要创建迁移前备份。
 ///
-/// 采用「**本数据目录是否已被本类备份覆盖过一次**」的稳妥判据，而不是去枚举
-/// 具体哪一步迁移（schema / `.meta` / 历史回填）待执行 —— 后者容易漏判（例如
-/// `accounts.json` 与 `backup_configs.owner_uid` 都已就绪，但 `.meta` 或历史表
-/// 仍需回填时，窄判据会跳过备份后又写盘）。
+/// 采用「**当前程序版本是否已为本数据目录备份过**」的判据，而不是去枚举具体哪一步
+/// 迁移（schema / `.meta` / 历史回填）待执行 —— 后者容易漏判（例如 `accounts.json`
+/// 与 `backup_configs.owner_uid` 都已就绪，但 `.meta` 或历史表仍需回填时，窄判据会
+/// 跳过备份后又写盘）。
 ///
 /// 返回 `true` 当且仅当：
-///   1. `config/backups/` 下尚无任何**有效**的 `pre_migration_*` 备份（即带
-///      [`BACKUP_MANIFEST`] 完成标记的目录）；**且**
-///   2. 存在升级前的既有数据（`db_path` / `session.json` / `accounts.json`
-///      任一存在）—— 全新安装无需备份。
+///   1. 存在升级前的既有数据（`db_path` / `session.json` / `accounts.json`
+///      任一存在）—— 全新安装无需备份；**且**
+///   2. 版本标记（[`VERSION_MARKER`]）缺失或与 `app_version` 不一致 —— 即本版本
+///      尚未成功备份过（缺失对应「从引入版本标记之前的版本升级上来」）。
 ///
-/// 这样可保证：升级用户在**任何破坏性迁移发生前**恰好备份一次；之后每次启动
-/// 因已存在**有效**备份而跳过，不会堆积。
+/// 这样可保证：每次升级（版本变化）在**任何破坏性迁移发生前**恰好备份一次；同一
+/// 版本的后续启动因标记一致而跳过。备份失败时不写标记，下次启动重做，避免「以为有
+/// 备份其实是空壳」。
 ///
-/// 注意「**有效**」：只创建了目录但复制失败 / 不完整（未写入 manifest）的残缺
-/// 目录**不算**已备份，下次启动会重新备份，避免「以为有备份其实是空壳」。
+/// 取舍：**只看版本标记，不校验备份目录本身是否仍有效存在**。同版本内用户手动删除
+/// / 损坏了备份，也不会重新备份，直到下次版本变化。原因：
+///   - 同版本后续启动时迁移早已执行完，此时补做的备份是**迁移后**的数据，名不副实；
+///   - 「标记一致但无有效备份」也是**全新安装**的常态（无数据时只写标记不备份），
+///     若据此告警会让每个全新安装每次启动都误报。
 pub fn needs_pre_migration_backup(
     config_dir: &Path,
     db_path: &Path,
     session_path: &Path,
     accounts_path: &Path,
+    app_version: &str,
 ) -> bool {
-    if valid_pre_migration_backup_exists(config_dir) {
+    if !(db_path.exists() || session_path.exists() || accounts_path.exists()) {
         return false;
     }
-    db_path.exists() || session_path.exists() || accounts_path.exists()
+    read_backup_version(config_dir).as_deref() != Some(app_version)
+}
+
+/// 读取版本标记；不存在 / 读取失败返回 `None`。
+fn read_backup_version(config_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(config_dir.join("backups").join(VERSION_MARKER))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// 确保版本标记记录为 `app_version`（已一致则不写盘）。
+///
+/// 用于**无需备份**的启动（全新安装 / 本版本已备份）：全新安装此时写入标记，避免
+/// 首次启动产生数据后，第二次启动被误判为「升级」而多做一次备份。
+pub async fn ensure_backup_version_recorded(config_dir: &Path, app_version: &str) {
+    if read_backup_version(config_dir).as_deref() == Some(app_version) {
+        return;
+    }
+    if let Err(e) = write_backup_version(config_dir, app_version).await {
+        warn!("写入迁移前备份版本标记失败（不阻塞启动）: {e:#}");
+    }
+}
+
+async fn write_backup_version(config_dir: &Path, app_version: &str) -> Result<()> {
+    let backups = config_dir.join("backups");
+    tokio::fs::create_dir_all(&backups)
+        .await
+        .with_context(|| format!("创建备份目录失败: {}", backups.display()))?;
+    let marker = backups.join(VERSION_MARKER);
+    tokio::fs::write(&marker, app_version)
+        .await
+        .with_context(|| format!("写入版本标记失败: {}", marker.display()))
+}
+
+/// 若 `name` 严格形如 `pre_migration_<YYYYmmdd_HHMMSS>`，返回其时间戳部分。
+///
+/// 额外要求定长 15 字符：chrono 的 `%m` / `%d` 等也接受 1 位数字，不定长的名字会
+/// 破坏「字典序即时间序」，此类（多为手动改名的）目录一律视为无法识别、不参与清理。
+fn backup_dir_timestamp(name: &str) -> Option<&str> {
+    let ts = name.strip_prefix(BACKUP_DIR_PREFIX)?;
+    if ts.len() != 15 {
+        return None;
+    }
+    chrono::NaiveDateTime::parse_from_str(ts, BACKUP_TS_FORMAT)
+        .ok()
+        .map(|_| ts)
+}
+
+/// 单个备份目录是否为**有效**（完整）备份：存在 [`BACKUP_MANIFEST`] 完成标记，
+/// **且** manifest 声明的关键文件都确实存在（见 [`manifest_required_satisfied`]）。
+fn is_valid_backup_dir(dir: &Path) -> bool {
+    dir.join(BACKUP_MANIFEST).exists() && manifest_required_satisfied(dir)
 }
 
 /// 探测 `config/backups/` 下是否已存在**有效**的 `pre_migration_*` 备份目录。
-///
-/// 「有效」= 目录名以 `pre_migration_` 开头 **且** 目录内存在
-/// [`BACKUP_MANIFEST`] 完成标记，**且** manifest 声明的 `required` 关键文件
-/// 都确实存在于该备份目录（见 [`manifest_required_satisfied`]）。
+#[cfg(test)]
 fn valid_pre_migration_backup_exists(config_dir: &Path) -> bool {
     let backups = config_dir.join("backups");
     match std::fs::read_dir(&backups) {
         Ok(rd) => rd.filter_map(|e| e.ok()).any(|e| {
-            let dir = e.path();
             e.file_name()
                 .to_string_lossy()
-                .starts_with("pre_migration_")
-                && dir.join(BACKUP_MANIFEST).exists()
-                && manifest_required_satisfied(&dir)
+                .starts_with(BACKUP_DIR_PREFIX)
+                && is_valid_backup_dir(&e.path())
         }),
         Err(_) => false,
     }
+}
+
+/// 清理旧的迁移前备份：保留 `current`（刚创建的那份）以及除它之外最新的
+/// `keep - 1` 份**有效**备份，删除其余更早的有效备份与残缺（无效）备份目录。
+///
+/// - 只处理名称严格为 `pre_migration_<时间戳>` 的**真实目录**（不跟随符号链接），
+///   无法识别的目录（如用户手动改名）一律不动。
+/// - `current` 显式保留，即使系统时钟回拨导致它的时间戳不是最新的也不会被删。
+/// - 仅应在**新备份成功之后**调用：同一版本只会成功备份一次，因而迁移失败后的
+///   反复重启不会把升级前那份好的备份挤掉。
+/// - 删除失败仅告警。返回已删除的目录列表。
+async fn prune_pre_migration_backups(
+    config_dir: &Path,
+    current: &Path,
+    keep: usize,
+) -> Vec<PathBuf> {
+    let backups = config_dir.join("backups");
+    let rd = match std::fs::read_dir(&backups) {
+        Ok(rd) => rd,
+        Err(e) => {
+            warn!("清理旧迁移前备份：读取 {} 失败（{}）", backups.display(), e);
+            return Vec::new();
+        }
+    };
+    let current_name = current.file_name().map(|n| n.to_owned());
+    // (时间戳, 路径)；不含 current
+    let mut candidates: Vec<(String, PathBuf)> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .filter(|e| Some(e.file_name()) != current_name)
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            backup_dir_timestamp(&name).map(|ts| (ts.to_string(), e.path()))
+        })
+        .collect();
+    // 时间戳新 → 旧
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut kept = 1usize; // current
+    let mut removed = Vec::new();
+    for (_, dir) in candidates {
+        if kept < keep && is_valid_backup_dir(&dir) {
+            kept += 1;
+            continue;
+        }
+        match tokio::fs::remove_dir_all(&dir).await {
+            Ok(()) => {
+                info!("已清理旧迁移前备份: {}", dir.display());
+                removed.push(dir);
+            }
+            Err(e) => warn!("清理旧迁移前备份 {} 失败（{}）", dir.display(), e),
+        }
+    }
+    removed
 }
 
 /// 校验备份目录的 manifest 是否表明这是一份有效（完整）备份。
@@ -173,19 +294,24 @@ pub struct PreMigrationBackup {
 /// * `config_dir` —— 配置目录（通常为 `config`）。
 /// * `db_path` —— **真实** SQLite 路径（来自 `AppConfig.persistence.db_path`）。
 /// * `wal_dir` —— WAL / `.meta` 目录。
+/// * `app_version` —— 当前程序版本，写入 manifest 与版本标记。
 ///
 /// 单文件 / 子目录复制失败仅 `warn!` 跳过（best-effort）；但若**一项都没复制成功**
-/// 或**完成标记（manifest）写入失败**，则返回 `Err`（不写 manifest，目录不算有效
-/// 备份，下次启动重做）。调用方对 `Err` 仅告警、不阻塞启动。
+/// 或**完成标记（manifest）写入失败**，则返回 `Err`（不写 manifest、不写版本标记，
+/// 目录不算有效备份，下次启动重做）。调用方对 `Err` 仅告警、不阻塞启动。
+///
+/// 成功后写入版本标记，并清理旧备份只保留最近 [`PRE_MIGRATION_KEEP`] 份；这两步
+/// 失败仅告警，不影响本次备份的有效性。
 pub async fn create_pre_migration_backup(
     config_dir: &Path,
     db_path: &Path,
     wal_dir: &Path,
+    app_version: &str,
 ) -> Result<PreMigrationBackup> {
-    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let ts = chrono::Local::now().format(BACKUP_TS_FORMAT).to_string();
     let backup_dir = config_dir
         .join("backups")
-        .join(format!("pre_migration_{ts}"));
+        .join(format!("{BACKUP_DIR_PREFIX}{ts}"));
     tokio::fs::create_dir_all(&backup_dir)
         .await
         .with_context(|| format!("创建迁移前备份目录失败: {}", backup_dir.display()))?;
@@ -226,7 +352,10 @@ pub async fn create_pre_migration_backup(
             }
         }
     } else {
-        warn!("迁移前备份：db_path 无文件名，跳过 DB 复制: {}", db_path.display());
+        warn!(
+            "迁移前备份：db_path 无文件名，跳过 DB 复制: {}",
+            db_path.display()
+        );
     }
 
     // 3) 整个 wal_dir 目录（任务 `.meta` 状态）：源端存在则计入 required。
@@ -244,7 +373,11 @@ pub async fn create_pre_migration_backup(
         let dest = backup_dir.join(&dest_name);
         match copy_dir_recursive(wal_dir, &dest).await {
             Ok(stats) if stats.failed == 0 => {
-                copied.push(format!("{} (目录, {} 个文件)", dest.display(), stats.copied()));
+                copied.push(format!(
+                    "{} (目录, {} 个文件)",
+                    dest.display(),
+                    stats.copied()
+                ));
                 let name = dest_name.to_string_lossy().into_owned();
                 required.push(name.clone());
                 wal_backup_name = Some(name);
@@ -258,7 +391,11 @@ pub async fn create_pre_migration_backup(
                     stats.failed
                 );
             }
-            Err(e) => anyhow::bail!("迁移前备份：复制 wal 目录 {} 失败（{}）", wal_dir.display(), e),
+            Err(e) => anyhow::bail!(
+                "迁移前备份：复制 wal 目录 {} 失败（{}）",
+                wal_dir.display(),
+                e
+            ),
         }
     }
 
@@ -274,6 +411,8 @@ pub async fn create_pre_migration_backup(
     // 写入完成标记（manifest）。**必须是最后一步**——只有它存在才算有效备份。
     let manifest = serde_json::json!({
         "completed_at": chrono::Local::now().to_rfc3339(),
+        // 做这份备份的程序版本（即本次升级到的版本），便于还原时辨认是哪次升级前的数据
+        "app_version": app_version,
         "db_path": db_path.display().to_string(),
         "wal_dir": wal_dir.display().to_string(),
         "required": required,
@@ -299,6 +438,20 @@ pub async fn create_pre_migration_backup(
         copied.len(),
         BACKUP_MANIFEST
     );
+
+    // 记录本版本已备份；失败仅告警（下次启动会再备份一次，数量仍受清理约束）
+    if let Err(e) = write_backup_version(config_dir, app_version).await {
+        warn!("写入迁移前备份版本标记失败: {e:#}");
+    }
+    let removed = prune_pre_migration_backups(config_dir, &backup_dir, PRE_MIGRATION_KEEP).await;
+    if !removed.is_empty() {
+        info!(
+            "迁移前备份保留最近 {} 份，已清理 {} 份旧备份",
+            PRE_MIGRATION_KEEP,
+            removed.len()
+        );
+    }
+
     Ok(PreMigrationBackup {
         dir: backup_dir,
         copied,
@@ -360,7 +513,7 @@ mod tests {
             .await
             .unwrap();
 
-        let out = create_pre_migration_backup(&config_dir, &db_path, &wal_dir)
+        let out = create_pre_migration_backup(&config_dir, &db_path, &wal_dir, "1.0.0")
             .await
             .unwrap();
 
@@ -374,8 +527,45 @@ mod tests {
         assert!(out.dir.join("wal").join("task1.meta").exists());
     }
 
-    #[test]
-    fn needs_backup_true_for_existing_data_then_false_after_backup_exists() {
+    #[tokio::test]
+    async fn needs_backup_is_gated_per_app_version() {
+        let root = tempfile::tempdir().unwrap();
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let db_path = config_dir.join("baidu-pcs.db");
+        let session_path = config_dir.join("session.json");
+        let accounts_path = config_dir.join("accounts.json");
+        let wal_dir = root.path().join("wal");
+        let needs = |v: &str| {
+            needs_pre_migration_backup(&config_dir, &db_path, &session_path, &accounts_path, v)
+        };
+
+        // 全新安装：无既有数据 → 不备份
+        assert!(!needs("1.0.0"));
+
+        // 存在既有数据但无版本标记（从引入标记之前的版本升级）→ 需要备份；
+        // 即使已有旧的有效备份也不能跳过（issue：首次升级的备份导致后续升级都不再备份）
+        std::fs::write(&db_path, b"db").unwrap();
+        let legacy = config_dir
+            .join("backups")
+            .join("pre_migration_20240101_000000");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join(BACKUP_MANIFEST), b"{}").unwrap();
+        assert!(needs("1.0.0"), "旧版本留下的备份不应让后续升级跳过备份");
+
+        // 本版本备份成功 → 同版本后续启动跳过
+        create_pre_migration_backup(&config_dir, &db_path, &wal_dir, "1.0.0")
+            .await
+            .unwrap();
+        assert!(!needs("1.0.0"));
+
+        // 升级 / 降级（版本变化）→ 再次需要备份
+        assert!(needs("1.1.0"));
+        assert!(needs("0.9.0"));
+    }
+
+    #[tokio::test]
+    async fn fresh_install_records_version_and_skips_second_start() {
         let root = tempfile::tempdir().unwrap();
         let config_dir = root.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
@@ -383,39 +573,126 @@ mod tests {
         let session_path = config_dir.join("session.json");
         let accounts_path = config_dir.join("accounts.json");
 
-        // 全新安装：无既有数据 → 不备份
+        // 首次启动无数据 → 不备份，但记录版本
         assert!(!needs_pre_migration_backup(
             &config_dir,
             &db_path,
             &session_path,
-            &accounts_path
+            &accounts_path,
+            "1.0.0"
         ));
+        ensure_backup_version_recorded(&config_dir, "1.0.0").await;
 
-        // 升级用户：存在既有数据（任一即可）→ 需要备份
+        // 运行中产生了数据，第二次启动同版本 → 不应误判为升级
         std::fs::write(&db_path, b"db").unwrap();
-        assert!(needs_pre_migration_backup(
-            &config_dir,
-            &db_path,
-            &session_path,
-            &accounts_path
-        ));
-
-        // 残缺备份（只建了目录但无 manifest 完成标记）→ 不算有效备份，仍需备份
-        let incomplete = config_dir.join("backups").join("pre_migration_20240101_000000");
-        std::fs::create_dir_all(&incomplete).unwrap();
-        assert!(
-            needs_pre_migration_backup(&config_dir, &db_path, &session_path, &accounts_path),
-            "残缺（无 manifest）的备份目录不应被认作已备份"
-        );
-
-        // 写入 manifest 完成标记后 → 视为有效备份，不再重复
-        std::fs::write(incomplete.join(BACKUP_MANIFEST), b"{}").unwrap();
         assert!(!needs_pre_migration_backup(
             &config_dir,
             &db_path,
             &session_path,
-            &accounts_path
+            &accounts_path,
+            "1.0.0"
         ));
+    }
+
+    #[tokio::test]
+    async fn failed_backup_does_not_record_version() {
+        let root = tempfile::tempdir().unwrap();
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        // db_path 指向不存在的文件、其余也都不存在 → 一项都没复制 → Err
+        let db_path = config_dir.join("baidu-pcs.db");
+        let wal_dir = root.path().join("wal");
+        assert!(
+            create_pre_migration_backup(&config_dir, &db_path, &wal_dir, "1.0.0")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            read_backup_version(&config_dir),
+            None,
+            "备份失败不应写版本标记"
+        );
+    }
+
+    /// 在 backups/ 下造一个有效备份目录（带空 manifest）。
+    fn make_valid_backup(config_dir: &Path, name: &str) -> PathBuf {
+        let dir = config_dir.join("backups").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(BACKUP_MANIFEST), b"{}").unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn prune_keeps_latest_valid_backups_and_current() {
+        let root = tempfile::tempdir().unwrap();
+        let config_dir = root.path().join("config");
+        let b1 = make_valid_backup(&config_dir, "pre_migration_20260101_000000");
+        let b2 = make_valid_backup(&config_dir, "pre_migration_20260201_000000");
+        let b3 = make_valid_backup(&config_dir, "pre_migration_20260301_000000");
+        let b4 = make_valid_backup(&config_dir, "pre_migration_20260401_000000");
+        // 残缺目录（无 manifest）
+        let broken = config_dir
+            .join("backups")
+            .join("pre_migration_20260501_000000");
+        std::fs::create_dir_all(&broken).unwrap();
+        // 无法识别的目录 / 文件：不动
+        let renamed = make_valid_backup(&config_dir, "pre_migration_before_v2");
+        let other = make_valid_backup(&config_dir, "manual_backup");
+        // 不定长时间戳（chrono 可解析但破坏字典序）：同样视为无法识别
+        let short_ts = make_valid_backup(&config_dir, "pre_migration_2026011_000000");
+        // current 的时间戳比其它都旧（模拟时钟回拨）→ 仍必须保留
+        let current = make_valid_backup(&config_dir, "pre_migration_20250101_000000");
+
+        let removed = prune_pre_migration_backups(&config_dir, &current, 3).await;
+
+        assert!(current.exists(), "刚创建的备份必须保留");
+        assert!(
+            b4.exists() && b3.exists(),
+            "除 current 外保留最新的 2 份有效备份"
+        );
+        assert!(!b2.exists() && !b1.exists(), "更早的有效备份应被清理");
+        assert!(!broken.exists(), "残缺备份应被清理");
+        assert!(
+            renamed.exists() && other.exists() && short_ts.exists(),
+            "无法识别的目录不应被删除"
+        );
+        assert_eq!(removed.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn successful_backup_prunes_old_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let db_path = config_dir.join("baidu-pcs.db");
+        std::fs::write(&db_path, b"db").unwrap();
+        let wal_dir = root.path().join("wal");
+        for name in [
+            "pre_migration_20200101_000000",
+            "pre_migration_20200201_000000",
+            "pre_migration_20200301_000000",
+        ] {
+            make_valid_backup(&config_dir, name);
+        }
+
+        let out = create_pre_migration_backup(&config_dir, &db_path, &wal_dir, "2.0.0")
+            .await
+            .unwrap();
+
+        let mut left: Vec<String> = std::fs::read_dir(config_dir.join("backups"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(BACKUP_DIR_PREFIX))
+            .collect();
+        left.sort();
+        assert_eq!(left.len(), PRE_MIGRATION_KEEP);
+        assert!(!left.contains(&"pre_migration_20200101_000000".to_string()));
+        assert!(out.dir.exists());
+        assert_eq!(read_backup_version(&config_dir).as_deref(), Some("2.0.0"));
+        let raw = std::fs::read_to_string(out.dir.join(BACKUP_MANIFEST)).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(json["app_version"].as_str(), Some("2.0.0"));
     }
 
     #[tokio::test]
@@ -434,7 +711,7 @@ mod tests {
         std::fs::write(wal_dir.join("task1.meta"), b"m").unwrap();
         std::fs::write(wal_dir.join("sub").join("task2.meta"), b"m").unwrap();
 
-        let out = create_pre_migration_backup(&config_dir, &db_path, &wal_dir)
+        let out = create_pre_migration_backup(&config_dir, &db_path, &wal_dir, "1.0.0")
             .await
             .expect("应成功并写入 manifest");
         // manifest 必须作为完成标记存在
@@ -456,7 +733,10 @@ mod tests {
             "session.json",
             "wal",
         ] {
-            assert!(required.contains(&expect.to_string()), "required 应含 {expect}");
+            assert!(
+                required.contains(&expect.to_string()),
+                "required 应含 {expect}"
+            );
         }
         // manifest 应记录 wal 目录名与其下文件相对路径清单（含子目录，用 / 分隔）
         assert_eq!(json["wal_backup_dir"].as_str(), Some("wal"));
@@ -511,7 +791,9 @@ mod tests {
         // 向后兼容：旧 manifest（#10）只有 wal_file_count、无 wal_files → 回退到数量校验
         let root = tempfile::tempdir().unwrap();
         let config_dir = root.path().join("config");
-        let dir = config_dir.join("backups").join("pre_migration_20230101_000000");
+        let dir = config_dir
+            .join("backups")
+            .join("pre_migration_20230101_000000");
         std::fs::create_dir_all(dir.join("wal")).unwrap();
         std::fs::write(dir.join("wal").join("a.meta"), b"m").unwrap();
         std::fs::write(dir.join("wal").join("b.meta"), b"m").unwrap();
@@ -545,7 +827,7 @@ mod tests {
 
         // 仅当权限确实生效（非 root、文件确不可读）才断言；root 下可读则跳过
         let unreadable = std::fs::read(&bad).is_err();
-        let res = create_pre_migration_backup(&config_dir, &db_path, &wal_dir).await;
+        let res = create_pre_migration_backup(&config_dir, &db_path, &wal_dir, "1.0.0").await;
         if unreadable {
             assert!(res.is_err(), "wal 内容复制不完整时应返回 Err");
             assert!(
@@ -567,7 +849,9 @@ mod tests {
         // 向后兼容：旧 manifest 不含 required 字段 → 仍按「存在即有效」处理
         let root = tempfile::tempdir().unwrap();
         let config_dir = root.path().join("config");
-        let dir = config_dir.join("backups").join("pre_migration_20230101_000000");
+        let dir = config_dir
+            .join("backups")
+            .join("pre_migration_20230101_000000");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(BACKUP_MANIFEST), br#"{"completed_at":"x"}"#).unwrap();
         assert!(valid_pre_migration_backup_exists(&config_dir));
@@ -586,7 +870,9 @@ mod tests {
         // 损坏 / 半写入的 manifest（JSON 解析失败）→ 不算有效备份
         let root = tempfile::tempdir().unwrap();
         let config_dir = root.path().join("config");
-        let dir = config_dir.join("backups").join("pre_migration_20230101_000000");
+        let dir = config_dir
+            .join("backups")
+            .join("pre_migration_20230101_000000");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(BACKUP_MANIFEST), b"{not valid json").unwrap();
         assert!(
