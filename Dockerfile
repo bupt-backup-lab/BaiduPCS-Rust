@@ -52,6 +52,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     curl \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制后端可执行文件

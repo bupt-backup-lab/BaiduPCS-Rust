@@ -676,6 +676,7 @@ async fn main() -> anyhow::Result<()> {
             get(handlers::latest_snapshot),
         )
         .route("/share-sync/preview-tree", post(handlers::preview_tree))
+        .route("/share-sync/cron/preview", post(handlers::preview_cron))
         // 🔥 加密数据导出 API
         .route("/encryption/export-bundle", post(handlers::export_bundle))
         .route("/encryption/export-mapping", get(handlers::export_mapping))

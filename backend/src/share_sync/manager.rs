@@ -29,7 +29,7 @@ use crate::share_sync::persistence::{
     ShareSyncPersistence, RUN_PHASE_DIFFING, RUN_PHASE_EXECUTING, RUN_PHASE_SCANNING,
 };
 use crate::share_sync::resolver::ShareSyncAccountResolver;
-use crate::share_sync::scheduler::SubscriptionScheduler;
+use crate::share_sync::scheduler::{describe_schedule, SubscriptionScheduler};
 use crate::share_sync::snapshot::{
     CapturedShare, ScanCache, ScanProgressSink, ShareSnapshot, ShareSnapshotItem, SnapshotCollector,
 };
@@ -530,16 +530,33 @@ impl ShareSyncManager {
         let started_at = tokio::time::Instant::now();
         let hard_timeout = share_sync_task_hard_timeout();
 
+        // 🔥 无进展检测，与正常 run 的 `wait_transfer_task` 同口径同参数。
+        //
+        // 此前接管只会唤醒「暂停」的残留下载，然后干等全部下完，没有任何停滞检测：
+        // 残留下载只要停在 downloading / pending 不动（实测：文件夹完成数没落盘，
+        // 重启后永远凑不满 total_files），接管就一直挂到 7 天硬上限，期间占着
+        // `running`，点「立即同步」也只是「唤醒 0 个」。现在：
+        // - 在排队等槽位不算停滞（同 `is_waiting_for_download_slot`）；
+        // - 停滞超过 stall_retry_after 先暂停再继续踢一下，最多 stall_retry_max 次；
+        // - 停滞超过 idle_timeout 放弃接管：清掉残留、按失败收尾，下一轮重新同步。
+        let idle_timeout =
+            share_sync_task_idle_timeout(crate::share_sync::executor::TASK_WAIT_TIMEOUT);
+        let stall_retry_after = share_sync_stall_retry_after(idle_timeout);
+        let stall_retry_max = share_sync_stall_retry_max();
+        let stall_retry_cooldown = share_sync_stall_retry_cooldown();
+        let mut last_activity_at = started_at;
+        let mut last_signature: Option<Vec<SubtaskActivitySignature>> = None;
+        let mut last_slot_probe_at: Option<tokio::time::Instant> = None;
+        let mut last_stall_retry_at: Option<tokio::time::Instant> = None;
+        let mut stall_retry_attempts = 0u32;
+        let mut abandon_reason: Option<String> = None;
+
         let mut last_resume_at: Option<tokio::time::Instant> = None;
         loop {
             if let Some(cap) = hard_timeout {
                 if started_at.elapsed() >= cap {
-                    warn!(
-                        "share_sync 续跑接管: 订阅 {} run={} 超过硬上限 {}s 仍未结束，放弃接管并按失败收尾",
-                        sub_id,
-                        run_id,
-                        cap.as_secs()
-                    );
+                    abandon_reason =
+                        Some(format!("重启续跑超过硬上限 {}s 仍未完成", cap.as_secs()));
                     break;
                 }
             }
@@ -558,9 +575,9 @@ impl ShareSyncManager {
                 last_resume_at = Some(now);
                 let has_slot = first_wake
                     || match tm.download_manager_handle().await {
-                    Some(dm) => dm.task_slot_pool().available_slots().await > 0,
-                    None => true,
-                };
+                        Some(dm) => dm.task_slot_pool().available_slots().await > 0,
+                        None => true,
+                    };
                 if has_slot {
                     let n = wake_paused_share_sync_downloads(&tm, &sub_id, owner_uid).await;
                     if n > 0 {
@@ -580,28 +597,101 @@ impl ShareSyncManager {
             // 等的是**下载**而不是转存任务：转存任务启动自动下载后就被落盘成
             // completed 并移入历史，重启后压根不会被恢复（见 `probe_resumable_run`
             // 的说明）。真正承载进度的是文件夹下载 / 下载子任务。
-            let unfinished = collect_share_sync_subtasks(&tm, &sub_id, owner_uid)
-                .await
-                .into_iter()
-                .filter(|s| s.kind == "download" && !is_terminal_subtask_status(&s.status))
-                .count();
-            if unfinished == 0 {
+            let unfinished: Vec<ShareSyncSubtask> =
+                collect_share_sync_subtasks(&tm, &sub_id, owner_uid)
+                    .await
+                    .into_iter()
+                    .filter(|s| s.kind == "download" && !is_terminal_subtask_status(&s.status))
+                    .collect();
+            if unfinished.is_empty() {
+                break;
+            }
+
+            let now = tokio::time::Instant::now();
+            let signature = subtask_activity_signatures(&unfinished);
+            if last_signature.as_ref() != Some(&signature) {
+                last_activity_at = now;
+                last_signature = Some(signature);
+            }
+            let mut idle_for = now.duration_since(last_activity_at);
+
+            // 排队等槽位不算停滞（理由见 `wait_transfer_task` 同名分支）；探测要遍历
+            // 下载任务表，按 QUEUE_WAIT_PROBE_AFTER 节流
+            let probe_due = idle_for >= QUEUE_WAIT_PROBE_AFTER
+                && last_slot_probe_at
+                    .map(|last| now.duration_since(last) >= QUEUE_WAIT_PROBE_AFTER)
+                    .unwrap_or(true);
+            if probe_due {
+                last_slot_probe_at = Some(now);
+                if is_waiting_for_download_slot(&tm, &sub_id).await {
+                    last_activity_at = now;
+                    idle_for = Duration::ZERO;
+                }
+            }
+
+            if let Some(retry_after) = stall_retry_after {
+                let retry_due = idle_for >= retry_after
+                    && stall_retry_attempts < stall_retry_max
+                    && last_stall_retry_at
+                        .map(|last| now.duration_since(last) >= retry_after)
+                        .unwrap_or(true);
+                if retry_due {
+                    last_stall_retry_at = Some(now);
+                    let restarted = restart_stalled_share_sync_downloads(
+                        &tm,
+                        &unfinished,
+                        stall_retry_cooldown,
+                    )
+                    .await;
+                    if restarted > 0 {
+                        stall_retry_attempts += 1;
+                        last_activity_at = tokio::time::Instant::now();
+                        warn!(
+                            "share_sync 续跑接管: 订阅 {} 残留下载长时间无进度，已暂停后继续 attempt={}/{}, restarted={}, idle_secs={}",
+                            sub_id,
+                            stall_retry_attempts,
+                            stall_retry_max,
+                            restarted,
+                            idle_for.as_secs()
+                        );
+                        // 刚踢过，本轮不能再按旧的 idle 判超时放弃
+                        idle_for = Duration::ZERO;
+                    }
+                }
+            }
+
+            if idle_for >= idle_timeout {
+                abandon_reason = Some(format!("重启续跑的下载 {}s 无进展", idle_for.as_secs()));
                 break;
             }
             tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
         }
 
-        self.finalize_resumed_run(&sub_id, &run_id, owner_uid, &tm)
+        if let Some(reason) = abandon_reason.as_deref() {
+            warn!(
+                "share_sync 续跑接管: 订阅 {} run={} {}，放弃接管：清理残留下载并按失败收尾，下一轮重新同步",
+                sub_id, run_id, reason
+            );
+            // 仍持有 running 守卫，可以安全清理；不清的话卡住的文件夹会一直占着下载槽位，
+            // 直到下一轮开头才被 sweep。已落地的文件不删，下一轮会直接认作已完成。
+            self.sweep_residual_subtasks(&sub_id, owner_uid).await;
+        }
+
+        self.finalize_resumed_run(&sub_id, &run_id, owner_uid, &tm, abandon_reason.as_deref())
             .await;
     }
 
     /// 给续跑完成的 run 收尾：补齐 item 状态 → 汇总 run 状态 → 落库 → 推进/清理基线。
+    ///
+    /// `abandon_reason` 为 `Some` 表示接管被放弃（停滞超时 / 硬上限）：下载没跑完，
+    /// 还挂着的 item 一律按失败收，不推进基线，下一轮重新同步。
     async fn finalize_resumed_run(
         &self,
         sub_id: &str,
         run_id: &str,
         owner_uid: u64,
         tm: &TransferManager,
+        abandon_reason: Option<&str>,
     ) {
         use crate::share_sync::types::{DiffSummary, RunItemStatus, RunStatus};
 
@@ -610,11 +700,16 @@ impl ShareSyncManager {
         // 收尾粒度是「整批」而不是逐个 item：run_item 记的是转存任务 id，而一个转存
         // 任务往往对应一整个文件夹下载，没法反查到单个文件的成败。这与现有语义一致
         // ——`should_advance_snapshot_baseline` 本来就是全或无。
-        let download_failed = collect_share_sync_subtasks(tm, sub_id, owner_uid)
-            .await
-            .into_iter()
-            .filter(|s| s.kind == "download")
-            .any(|s| matches!(s.status.as_str(), "failed" | "cancelled" | "downloadfailed"));
+        let download_failed = abandon_reason.is_some()
+            || collect_share_sync_subtasks(tm, sub_id, owner_uid)
+                .await
+                .into_iter()
+                .filter(|s| s.kind == "download")
+                .any(|s| matches!(s.status.as_str(), "failed" | "cancelled" | "downloadfailed"));
+        let failed_item_error = match abandon_reason {
+            Some(reason) => format!("重启续跑：{}，已放弃", reason),
+            None => "重启续跑：本批下载存在失败项".to_string(),
+        };
 
         let items = self.persistence.list_run_items(run_id).unwrap_or_default();
         let mut failed = 0usize;
@@ -631,10 +726,7 @@ impl ShareSyncManager {
             }
             // 还挂着的 item：按整批下载的结果统一判定
             let (status, err) = if download_failed {
-                (
-                    RunItemStatus::Failed,
-                    Some("重启续跑：本批下载存在失败项".to_string()),
-                )
+                (RunItemStatus::Failed, Some(failed_item_error.clone()))
             } else {
                 (RunItemStatus::Completed, None)
             };
@@ -647,8 +739,9 @@ impl ShareSyncManager {
                 .update_run_item_status(it.id, status, err.as_deref());
         }
 
-        // 2) 汇总 run 状态
-        let status = if failed > 0 {
+        // 2) 汇总 run 状态。放弃接管时下载没跑完，即便 item 恰好都已到终态也不能算
+        //    干净完成（否则会推进基线，没下完的文件下一轮不再补）
+        let status = if failed > 0 || abandon_reason.is_some() {
             RunStatus::CompletedWithErrors
         } else {
             RunStatus::Completed
@@ -660,10 +753,13 @@ impl ShareSyncManager {
             ..Default::default()
         };
         let now = chrono::Utc::now().timestamp();
-        if let Err(e) = self
-            .persistence
-            .finish_run(run_id, now, status, &summary, None)
-        {
+        if let Err(e) = self.persistence.finish_run(
+            run_id,
+            now,
+            status,
+            &summary,
+            abandon_reason.map(|_| failed_item_error.as_str()),
+        ) {
             warn!("续跑收尾: finish_run 失败 run_id={}, error={}", run_id, e);
         }
 
@@ -1539,7 +1635,7 @@ impl ShareSyncManager {
                 // 列目录抓快照与转存提交共用同一个全局风控限速器
                 self.rate_limiter.clone(),
             )
-                .await
+            .await
             {
                 Ok(collector) => collector
                     .with_progress(Arc::clone(&scan_sink))
@@ -1693,7 +1789,7 @@ impl ShareSyncManager {
             id.to_string(),
             owner_uid,
         )
-            .await;
+        .await;
 
         // 仅当 run 完成**且**没有任何子项因资源类原因（配额满 / 本地磁盘满）被跳过时，
         // 才推进快照基线。否则被跳过、尚未真正落地的项会被写入新基线，导致下一次
@@ -1864,14 +1960,14 @@ impl ShareSyncManager {
     // ===================================================
 
     fn start_scheduler_for(self: &Arc<Self>, sub: &ShareSubscription) {
-        let interval = sub.poll_config.effective_interval_secs();
-        if interval == 0 {
+        let Some(schedule) = sub.poll_config.schedule() else {
             return;
-        }
+        };
         if self.schedulers.contains_key(&sub.id) {
             return;
         }
-        let mut sched = SubscriptionScheduler::new(sub.id.clone(), interval);
+        let schedule_desc = describe_schedule(&schedule);
+        let mut sched = SubscriptionScheduler::new(sub.id.clone(), schedule);
         let mgr = Arc::clone(self);
         let sub_id = sub.id.clone();
         sched.start(move |id| {
@@ -1881,7 +1977,7 @@ impl ShareSyncManager {
                 mgr2.execute_one(&id).await.map(|_| ())
             }
         });
-        info!("scheduler: 启动订阅 {} (interval={}s)", sub_id, interval);
+        info!("scheduler: 启动订阅 {} ({})", sub_id, schedule_desc);
         self.schedulers.insert(sub.id.clone(), sched);
     }
 
@@ -2460,7 +2556,7 @@ fn restartable_share_sync_download(
             subtask.status.as_str(),
             "scanning" | "downloading" | "paused" | "pending"
         )
-            .then(|| RestartableShareSyncDownload::Folder(folder_id.to_string()));
+        .then(|| RestartableShareSyncDownload::Folder(folder_id.to_string()));
     }
 
     matches!(subtask.status.as_str(), "downloading" | "paused")
@@ -2660,6 +2756,24 @@ fn task_activity_signature(
     completed_download_ids.sort();
     let mut failed_download_ids = task.failed_download_ids.clone();
     failed_download_ids.sort();
+
+    TaskActivitySignature {
+        status: task.status.clone(),
+        transferred_count: task.transferred_count,
+        total_count: task.total_count,
+        updated_at: task.updated_at,
+        download_task_ids,
+        completed_download_ids,
+        failed_download_ids,
+        subtasks: subtask_activity_signatures(subtasks),
+    }
+}
+
+/// 子任务进度的活动签名：任何一个子任务的状态 / 字节数 / 进度变了，签名就变。
+///
+/// 正常 run 拼在转存任务的签名里用（[`task_activity_signature`]）；重启续跑接管时
+/// 转存任务早已归档，只能单看子任务。
+fn subtask_activity_signatures(subtasks: &[ShareSyncSubtask]) -> Vec<SubtaskActivitySignature> {
     let mut subtask_signatures: Vec<SubtaskActivitySignature> = subtasks
         .iter()
         .map(|s| {
@@ -2684,17 +2798,7 @@ fn task_activity_signature(
             .then_with(|| a.kind.cmp(&b.kind))
             .then_with(|| a.status.cmp(&b.status))
     });
-
-    TaskActivitySignature {
-        status: task.status.clone(),
-        transferred_count: task.transferred_count,
-        total_count: task.total_count,
-        updated_at: task.updated_at,
-        download_task_ids,
-        completed_download_ids,
-        failed_download_ids,
-        subtasks: subtask_signatures,
-    }
+    subtask_signatures
 }
 
 fn env_duration_secs(name: &str) -> Option<Duration> {
@@ -2816,7 +2920,7 @@ async fn broadcast_subtask_progress(
             owner_uid,
             &mut reported_terminal,
         )
-            .await;
+        .await;
     }
 }
 
@@ -2839,7 +2943,7 @@ async fn broadcast_subtask_progress_once(
             owner_uid,
             &mut reported_terminal,
         )
-            .await;
+        .await;
     }
 }
 
@@ -2896,39 +3000,44 @@ impl ProductionHooks {
     /// - 不计入 idle 超时（否则非会员 1 槽位场景下，排在后面的同步会在
     ///   30 分钟后被误判为「等待任务完成超时」而整个 run 失败）
     async fn is_waiting_for_download_slot(&self) -> bool {
-        let tm = self.transfer_manager();
-        let Some(dm) = tm.download_manager_handle().await else {
-            return false;
-        };
-        // 有空位就不是「等槽位」——此时不动仍属于需要关注的停滞
-        if dm.task_slot_pool().available_slots().await > 0 {
-            return false;
-        }
-
-        let cfg = self.share_sync_backup_config_id();
-        // 单文件下载段：is_backup && backup_config_id == cfg
-        let mut statuses: Vec<crate::downloader::TaskStatus> = dm
-            .get_tasks_by_backup_config(&cfg)
-            .await
-            .iter()
-            .map(|t| t.status.clone())
-            .collect();
-
-        // 文件夹下载段：子任务带 group_id、is_backup=false，不会出现在上面按
-        // backup_config 的查询里（见 `DownloadTask::new_with_group`），要单独取
-        if let Some(fdm) = tm.folder_download_manager_handle().await {
-            for f in fdm.get_folders_by_backup_config(&cfg).await {
-                statuses.extend(
-                    dm.get_tasks_by_group(&f.id)
-                        .await
-                        .iter()
-                        .map(|t| t.status.clone()),
-                );
-            }
-        }
-
-        no_progress_but_queued(statuses.iter())
+        is_waiting_for_download_slot(&self.transfer_manager(), &self.subscription_id).await
     }
+}
+
+/// [`ProductionHooks::is_waiting_for_download_slot`] 的实现；重启续跑接管
+/// （`resume_run_in_place`）没有 hooks 实例，也要用同一个判定，故抽成自由函数。
+async fn is_waiting_for_download_slot(tm: &TransferManager, subscription_id: &str) -> bool {
+    let Some(dm) = tm.download_manager_handle().await else {
+        return false;
+    };
+    // 有空位就不是「等槽位」——此时不动仍属于需要关注的停滞
+    if dm.task_slot_pool().available_slots().await > 0 {
+        return false;
+    }
+
+    let cfg = share_sync_backup_config_id(subscription_id);
+    // 单文件下载段：is_backup && backup_config_id == cfg
+    let mut statuses: Vec<crate::downloader::TaskStatus> = dm
+        .get_tasks_by_backup_config(&cfg)
+        .await
+        .iter()
+        .map(|t| t.status.clone())
+        .collect();
+
+    // 文件夹下载段：子任务带 group_id、is_backup=false，不会出现在上面按
+    // backup_config 的查询里（见 `DownloadTask::new_with_group`），要单独取
+    if let Some(fdm) = tm.folder_download_manager_handle().await {
+        for f in fdm.get_folders_by_backup_config(&cfg).await {
+            statuses.extend(
+                dm.get_tasks_by_group(&f.id)
+                    .await
+                    .iter()
+                    .map(|t| t.status.clone()),
+            );
+        }
+    }
+
+    no_progress_but_queued(statuses.iter())
 }
 
 #[async_trait]
@@ -3227,8 +3336,8 @@ impl ExecutorHooks for ProductionHooks {
                     .collect();
                 let paused_resume_due = !paused_subtasks.is_empty()
                     && last_paused_resume_at
-                    .map(|last| now.duration_since(last) >= Duration::from_secs(10))
-                    .unwrap_or(true);
+                        .map(|last| now.duration_since(last) >= Duration::from_secs(10))
+                        .unwrap_or(true);
                 // 🔥 槽位满时不要强行 resume：resume 拿不到槽位只会让任务立刻回到
                 // 等待队列尾部（add_to_waiting_queue_*），状态在 paused/pending 之间
                 // 来回抖，还会把自己排到队尾、打乱 FIFO 顺序。等真有空位了再唤醒，
@@ -3305,8 +3414,8 @@ impl ExecutorHooks for ProductionHooks {
             let probe_due = require_download_completion
                 && idle_for >= QUEUE_WAIT_PROBE_AFTER
                 && last_slot_probe_at
-                .map(|last| now.duration_since(last) >= QUEUE_WAIT_PROBE_AFTER)
-                .unwrap_or(true);
+                    .map(|last| now.duration_since(last) >= QUEUE_WAIT_PROBE_AFTER)
+                    .unwrap_or(true);
             if probe_due {
                 last_slot_probe_at = Some(now);
                 if self.is_waiting_for_download_slot().await {
@@ -3325,8 +3434,8 @@ impl ExecutorHooks for ProductionHooks {
                     let retry_due = idle_for >= retry_after
                         && stall_retry_attempts < stall_retry_max
                         && last_stall_retry_at
-                        .map(|last| now.duration_since(last) >= retry_after)
-                        .unwrap_or(true);
+                            .map(|last| now.duration_since(last) >= retry_after)
+                            .unwrap_or(true);
                     if retry_due {
                         last_stall_retry_at = Some(now);
                         let restarted = restart_stalled_share_sync_downloads(
@@ -3334,7 +3443,7 @@ impl ExecutorHooks for ProductionHooks {
                             &subtasks,
                             stall_retry_cooldown,
                         )
-                            .await;
+                        .await;
                         if restarted > 0 {
                             stall_retry_attempts += 1;
                             last_activity_at = tokio::time::Instant::now();
@@ -4141,7 +4250,7 @@ mod tests {
                     TaskStatus::Pending,
                     TaskStatus::Pending,
                 ]
-                    .iter()
+                .iter()
             ),
             "槽位被自己占着在下载 → 不是「等槽位」，必须继续走停滞检测"
         );
@@ -4275,8 +4384,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert_eq!(m.list_subscriptions().len(), 0);
     }
 
@@ -4289,8 +4398,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let s = m.create_subscription(sub("a")).unwrap();
         assert_eq!(m.list_subscriptions().len(), 1);
         assert!(m.get_subscription(&s.id).is_some());
@@ -4312,8 +4421,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         let mut a = sub("a");
         a.owner_uid = 1;
@@ -4345,8 +4454,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let s = m.create_subscription(sub("a")).unwrap();
         let original_created = s.created_at;
 
@@ -4367,8 +4476,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let s = m.create_subscription(sub("a")).unwrap();
         m.set_enabled(&s.id, false).unwrap();
         assert!(!m.get_subscription(&s.id).unwrap().enabled);
@@ -4736,8 +4845,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let mut bad = sub("a");
         bad.share_url = "https://example.com".into();
         let r = m.create_subscription(bad);
@@ -4759,8 +4868,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let list = m.list_subscriptions();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "preloaded");
@@ -4775,8 +4884,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let s = m.create_subscription(sub("a")).unwrap();
         // netdisk_client 为 None → 应报错
         let r = m.execute_one(&s.id).await;
@@ -4794,8 +4903,8 @@ mod tests {
             resolver: Arc::new(StaticAccountResolver::none()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let mut sub = sub("a");
         sub.owner_uid = 1;
         let s = m.create_subscription(sub).unwrap();
@@ -4826,8 +4935,8 @@ mod tests {
             resolver: Arc::new(logged_in_resolver()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let mut sub = sub("a");
         sub.owner_uid = 1;
         let s = m.create_subscription(sub).unwrap();
@@ -4849,6 +4958,69 @@ mod tests {
         assert!(m.persistence.list_runs(&s.id, 1, 10).unwrap().is_empty());
     }
 
+    /// 接管被放弃（下载长时间无进展 / 硬上限）时必须按失败收尾：还挂着的 item 记失败，
+    /// run 不能是 Completed —— 否则会推进基线，没下完的文件下一轮再也不补。
+    ///
+    /// 回归：此前硬上限分支直接 break 进正常收尾，残留下载此时并没有失败状态，
+    /// 还挂着的 item 全被记成 Completed。
+    #[tokio::test]
+    async fn test_abandoned_resume_finalizes_as_failed() {
+        use crate::share_sync::types::{RunItemStatus, SyncAction, TargetKind};
+
+        let dir = tempdir().unwrap();
+        let m = ShareSyncManager::new(ManagerConfig {
+            config_path: dir.path().join("subs.json"),
+            db_path: dir.path().join("s.db"),
+            resolver: Arc::new(logged_in_resolver()),
+            publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
+        })
+        .await
+        .unwrap();
+        let mut sub = sub("a");
+        sub.owner_uid = 1;
+        let s = m.create_subscription(sub).unwrap();
+
+        m.persistence.start_run("run-old", &s.id, 1).unwrap();
+        for (path, status) in [
+            ("/done.mp4", RunItemStatus::Completed),
+            ("/stuck", RunItemStatus::Downloading),
+        ] {
+            m.persistence
+                .add_run_item(
+                    "run-old",
+                    path,
+                    SyncAction::Added,
+                    TargetKind::NetdiskAndLocal,
+                    Some("t-1"),
+                    None,
+                    status,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let tm = m.resolver.transfer_manager(1).await.unwrap();
+        m.finalize_resumed_run(
+            &s.id,
+            "run-old",
+            1,
+            &tm,
+            Some("重启续跑的下载 1800s 无进展"),
+        )
+        .await;
+
+        let run = m.persistence.get_run("run-old").unwrap().unwrap();
+        assert_eq!(run.status, "completed_with_errors");
+        assert_eq!(run.failed_count, 1);
+        assert!(run.error.unwrap().contains("无进展"));
+        let items = m.persistence.list_run_items("run-old").unwrap();
+        let stuck = items.iter().find(|i| i.path == "/stuck").unwrap();
+        assert_eq!(stuck.status, "failed", "没下完的 item 必须记失败");
+        let done = items.iter().find(|i| i.path == "/done.mp4").unwrap();
+        assert_eq!(done.status, "completed", "已完成的 item 保持原样");
+    }
+
     #[tokio::test]
     async fn test_trigger_one_with_real_run_in_flight_still_fails_fast() {
         let dir = tempdir().unwrap();
@@ -4858,8 +5030,8 @@ mod tests {
             resolver: Arc::new(logged_in_resolver()),
             publisher: Some(Arc::new(NoopShareSyncEventPublisher)),
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let mut sub = sub("a");
         sub.owner_uid = 1;
         let s = m.create_subscription(sub).unwrap();

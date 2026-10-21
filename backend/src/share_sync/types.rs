@@ -72,6 +72,9 @@ pub enum PollMode {
     /// 指定时间（每天固定时刻）
     #[serde(alias = "scheduled")]
     Scheduled,
+    /// cron 表达式（分 时 日 月 星期）
+    #[serde(alias = "cron")]
+    Cron,
     /// 禁用
     #[serde(alias = "disabled")]
     Disabled,
@@ -83,6 +86,7 @@ impl PollMode {
         match self {
             PollMode::Interval => "interval",
             PollMode::Scheduled => "scheduled",
+            PollMode::Cron => "cron",
             PollMode::Disabled => "disabled",
         }
     }
@@ -332,6 +336,7 @@ mod tests {
         for (value, expected) in [
             (PollMode::Interval, "interval"),
             (PollMode::Scheduled, "scheduled"),
+            (PollMode::Cron, "cron"),
             (PollMode::Disabled, "disabled"),
         ] {
             assert_eq!(value.as_str(), expected);

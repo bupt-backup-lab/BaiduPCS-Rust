@@ -373,9 +373,10 @@
           </div>
         </el-form-item>
         <el-form-item label="轮询">
-          <el-radio-group v-model="form.poll_config.mode">
+          <el-radio-group v-model="form.poll_config.mode" class="poll-mode-group">
             <el-radio-button value="interval">固定间隔</el-radio-button>
             <el-radio-button value="scheduled">每日定时</el-radio-button>
+            <el-radio-button value="cron">Cron 表达式</el-radio-button>
             <el-radio-button value="disabled">禁用</el-radio-button>
           </el-radio-group>
         </el-form-item>
@@ -390,6 +391,9 @@
               value-format="HH:mm"
               @change="onScheduledChange"
           />
+        </el-form-item>
+        <el-form-item v-if="form.poll_config.mode === 'cron'" label="表达式">
+          <CronExprEditor ref="cronEditorRef" v-model="form.poll_config.cron_expr" />
         </el-form-item>
         <el-form-item label="删除缺失">
           <el-switch v-model="form.delete_missing" />
@@ -506,6 +510,7 @@ import AccountFilter from '@/components/AccountFilter.vue'
 import AccountBadge from '@/components/AccountBadge.vue'
 import TransferDialog from '@/components/TransferDialog.vue'
 import ShareIncludeExcludeEditor from '@/components/ShareIncludeExcludeEditor.vue'
+import CronExprEditor from '@/components/CronExprEditor.vue'
 import { FilePickerModal } from '@/components/FilePicker'
 import { getConfig, updateRecentDirDebounced, setDefaultDownloadDir, type DownloadConfig } from '@/api/config'
 import {
@@ -762,6 +767,9 @@ const resumingId = ref<string | null>(null)
 const formRef = ref()
 const scheduledTime = ref<string>('03:00')
 
+// cron 编辑器（保存前用其预览结果拦截已知无效的表达式）
+const cronEditorRef = ref<InstanceType<typeof CronExprEditor> | null>(null)
+
 // 路径编辑
 function createDefaultTarget(): SyncTarget {
   return { kind: 'local', local_path: '', conflict_strategy: null, mode: 'share_direct' }
@@ -868,7 +876,14 @@ const defaultForm = (): {
   targets: [createDefaultTarget()],
   conflict_strategy: 'overwrite',
   delete_missing: false,
-  poll_config: { enabled: true, mode: 'interval', interval_secs: 1800, schedule_hour: null, schedule_minute: null },
+  poll_config: {
+    enabled: true,
+    mode: 'interval',
+    interval_secs: 1800,
+    schedule_hour: null,
+    schedule_minute: null,
+    cron_expr: null,
+  },
 })
 
 const form = ref(defaultForm())
@@ -887,6 +902,7 @@ function normalizePollConfigForUi(p?: PollConfig | null): PollConfig {
     interval_secs: intervalSecs,
     schedule_hour: mode === 'scheduled' ? (p?.schedule_hour ?? 3) : null,
     schedule_minute: mode === 'scheduled' ? (p?.schedule_minute ?? 0) : null,
+    cron_expr: p?.cron_expr ?? null,
   }
 }
 
@@ -903,6 +919,7 @@ function normalizePollConfigForSubmit(p: PollConfig): PollConfig {
       interval_secs: intervalSecs,
       schedule_hour: null,
       schedule_minute: null,
+      cron_expr: null,
     }
   }
 
@@ -913,6 +930,18 @@ function normalizePollConfigForSubmit(p: PollConfig): PollConfig {
       interval_secs: intervalSecs,
       schedule_hour: null,
       schedule_minute: null,
+      cron_expr: null,
+    }
+  }
+
+  if (mode === 'cron') {
+    return {
+      enabled: true,
+      mode: 'cron',
+      interval_secs: intervalSecs,
+      schedule_hour: null,
+      schedule_minute: null,
+      cron_expr: (p.cron_expr || '').trim(),
     }
   }
 
@@ -922,6 +951,7 @@ function normalizePollConfigForSubmit(p: PollConfig): PollConfig {
     interval_secs: intervalSecs,
     schedule_hour: p.schedule_hour ?? 3,
     schedule_minute: p.schedule_minute ?? 0,
+    cron_expr: null,
   }
 }
 
@@ -1109,6 +1139,17 @@ function validateForm(): boolean {
   if (form.value.poll_config.mode === 'interval' && form.value.poll_config.interval_secs < 600) {
     ElMessage.error('间隔模式下最少间隔为 600 秒（10 分钟）')
     return false
+  }
+
+  if (form.value.poll_config.mode === 'cron') {
+    const expr = form.value.poll_config.cron_expr || ''
+    const reason = expr
+      ? cronEditorRef.value?.invalidReason(expr) ?? null
+      : '请填写 cron 表达式'
+    if (reason) {
+      ElMessage.error(reason)
+      return false
+    }
   }
 
   return true
@@ -1374,6 +1415,9 @@ function describeInterval(p: PollConfig): string {
     const m = String(normalized.schedule_minute || 0).padStart(2, '0')
     return `每日 ${h}:${m}`
   }
+  if (normalized.mode === 'cron') {
+    return `Cron ${normalized.cron_expr || ''}`.trim()
+  }
   return '已禁用'
 }
 
@@ -1599,7 +1643,7 @@ function subtaskStatusColor(status: string): 'success' | 'warning' | 'danger' | 
     case 'failed': return 'danger'
     case 'cancelled':
     case 'paused': return 'warning'
-      // 真的在干活的都走 primary；等待类（pending/queued）留给 default 的 info
+    // 真的在干活的都走 primary；等待类（pending/queued）留给 default 的 info
     case 'scanning':
     case 'checkingshare':
     case 'transferring':
@@ -2118,4 +2162,5 @@ onUnmounted(() => {
 .tree-picker-hint { margin-right: 12px; color: #909399; font-size: 12px; }
 .tree-node { display: inline-flex; align-items: center; gap: 4px; }
 .tree-size { margin-left: 6px; color: #909399; font-size: 11px; }
+.poll-mode-group { flex-wrap: wrap; }
 </style>

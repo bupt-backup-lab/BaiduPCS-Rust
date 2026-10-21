@@ -15,8 +15,8 @@ use crate::server::extractors::{ensure_client_available, resolve_owner_uid_for_c
 use crate::server::AppState;
 use crate::share_sync::{
     infer_share_root, normalize_pagination, normalize_share_path, CreateShareSubscriptionRequest,
-    RunItemRecord, RunRecord, ShareSubscription, ShareSyncError, ShareSyncManager,
-    UpdateShareSubscriptionRequest,
+    CronSchedule, RunItemRecord, RunRecord, ShareSubscription, ShareSyncError, ShareSyncManager,
+    UpdateShareSubscriptionRequest, MIN_POLL_INTERVAL_SECS,
 };
 
 pub type ApiResult<T> = Result<T, ApiError>;
@@ -589,7 +589,7 @@ pub async fn preview_tree(
             f,
             depth - 1,
         )
-            .await;
+        .await;
         out.push(node);
     }
 
@@ -635,7 +635,7 @@ fn build_tree_node<'a>(
                                 f,
                                 remaining_depth - 1,
                             )
-                                .await,
+                            .await,
                         );
                     }
                     node.children = Some(kids);
@@ -648,6 +648,122 @@ fn build_tree_node<'a>(
         }
         node
     })
+}
+
+// =====================================================
+// cron 表达式预览
+// =====================================================
+
+#[derive(Debug, Deserialize)]
+pub struct CronPreviewRequest {
+    pub expr: String,
+    /// 返回接下来几次触发时间（默认 5，最多 10）
+    #[serde(default)]
+    pub count: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CronPreviewResponse {
+    /// 语法合法且满足最小轮询间隔，可直接保存
+    pub valid: bool,
+    /// 中文描述（语法合法即返回，即便触发过密）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// 接下来的触发时刻（服务器本地时区，`YYYY-MM-DD HH:MM`）
+    pub next_runs: Vec<String>,
+    /// 服务器时区相对 UTC 的偏移分钟数（前端据此提示与浏览器时区不一致）
+    pub utc_offset_minutes: i32,
+}
+
+/// POST /api/v1/share-sync/cron/preview
+///
+/// 编辑订阅时实时解释 cron 表达式：描述 + 接下来几次触发时间（按服务器时区）。
+pub async fn preview_cron(
+    Json(req): Json<CronPreviewRequest>,
+) -> ApiResult<Json<ApiResponse<CronPreviewResponse>>> {
+    Ok(Json(ApiResponse::success(build_cron_preview(
+        &req.expr,
+        req.count.unwrap_or(5).clamp(1, 10),
+        chrono::Local::now(),
+    ))))
+}
+
+fn build_cron_preview<Tz: chrono::TimeZone>(
+    expr: &str,
+    count: usize,
+    now: chrono::DateTime<Tz>,
+) -> CronPreviewResponse
+where
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::Offset;
+    let utc_offset_minutes = now.offset().fix().local_minus_utc() / 60;
+    let cron = match CronSchedule::parse(expr) {
+        Ok(c) => c,
+        Err(e) => {
+            return CronPreviewResponse {
+                valid: false,
+                description: None,
+                error: Some(e),
+                next_runs: Vec::new(),
+                utc_offset_minutes,
+            }
+        }
+    };
+    let error = cron.check_min_gap(MIN_POLL_INTERVAL_SECS).err();
+    let next_runs = cron
+        .upcoming(&now, count)
+        .iter()
+        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+        .collect();
+    CronPreviewResponse {
+        valid: error.is_none(),
+        description: Some(cron.describe()),
+        error,
+        next_runs,
+        utc_offset_minutes,
+    }
+}
+
+#[cfg(test)]
+mod cron_preview_tests {
+    use super::*;
+    use chrono::{FixedOffset, TimeZone};
+
+    #[test]
+    fn preview_valid_expression() {
+        let tz = FixedOffset::east_opt(8 * 3600).unwrap();
+        let now = tz.with_ymd_and_hms(2026, 10, 17, 13, 45, 0).unwrap();
+        let r = build_cron_preview("*/10 11-13 * * 6", 3, now);
+        assert!(r.valid);
+        assert_eq!(r.utc_offset_minutes, 480);
+        assert_eq!(
+            r.next_runs,
+            vec!["2026-10-17 13:50", "2026-10-24 11:00", "2026-10-24 11:10"]
+        );
+        assert!(r.description.is_some());
+        assert!(r.error.is_none());
+    }
+
+    #[test]
+    fn preview_too_dense_keeps_description() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let r = build_cron_preview("*/5 * * * *", 5, now);
+        assert!(!r.valid);
+        assert!(r.description.is_some());
+        assert!(r.error.unwrap().contains("过于频繁"));
+    }
+
+    #[test]
+    fn preview_syntax_error() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let r = build_cron_preview("1 2 3", 5, now);
+        assert!(!r.valid);
+        assert!(r.description.is_none());
+        assert!(r.next_runs.is_empty());
+    }
 }
 
 #[allow(dead_code)]

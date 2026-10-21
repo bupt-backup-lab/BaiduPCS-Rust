@@ -3,6 +3,7 @@
 //! 一个 `ShareSubscription` = 一条分享链接 + 至少一个目标（网盘/本地）
 //! + 冲突策略 + 轮询节奏。
 
+use crate::share_sync::cron::CronSchedule;
 use crate::share_sync::types::{ConflictStrategy, PollMode};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -85,6 +86,9 @@ pub struct PollConfig {
     /// 指定分钟（Scheduled 模式）
     #[serde(default)]
     pub schedule_minute: Option<u32>,
+    /// cron 表达式（Cron 模式），5 字段：分 时 日 月 星期，按服务器本地时区
+    #[serde(default)]
+    pub cron_expr: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -106,23 +110,62 @@ impl Default for PollConfig {
             interval_secs: default_interval_secs(),
             schedule_hour: None,
             schedule_minute: None,
+            cron_expr: None,
         }
     }
 }
 
+/// 调度器实际执行的轮询节奏
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PollSchedule {
+    /// 固定间隔秒数（已钳到 `MIN_POLL_INTERVAL_SECS` 以上）
+    Interval(u32),
+    /// 按 cron 时刻触发（「每日定时」也折算成 `m h * * *`）
+    Cron(CronSchedule),
+}
+
+/// 「每日定时」未填时刻时的默认值，与前端默认 03:00 一致
+const DEFAULT_SCHEDULE_HOUR: u32 = 3;
+const DEFAULT_SCHEDULE_MINUTE: u32 = 0;
+
 impl PollConfig {
-    /// 获取实际生效的间隔秒数（强制下限 600s）
-    pub fn effective_interval_secs(&self) -> u32 {
+    /// 解析出实际生效的调度节奏；禁用或配置无效时返回 `None`（不启动调度器）
+    pub fn schedule(&self) -> Option<PollSchedule> {
         if !self.enabled {
-            return 0; // 禁用
+            return None;
         }
         match self.mode {
-            PollMode::Disabled => 0,
-            PollMode::Interval => self.interval_secs.max(MIN_POLL_INTERVAL_SECS),
-            // Scheduled 模式：每天一次，按"秒"算 = 86400，但仍遵守 600s 下限
-            PollMode::Scheduled => 86_400,
+            PollMode::Disabled => None,
+            PollMode::Interval => Some(PollSchedule::Interval(
+                self.interval_secs.max(MIN_POLL_INTERVAL_SECS),
+            )),
+            PollMode::Scheduled => Some(PollSchedule::Cron(CronSchedule::daily(
+                self.schedule_hour.unwrap_or(DEFAULT_SCHEDULE_HOUR),
+                self.schedule_minute.unwrap_or(DEFAULT_SCHEDULE_MINUTE),
+            ))),
+            PollMode::Cron => {
+                let expr = self.cron_expr.as_deref().unwrap_or("");
+                match parse_poll_cron(expr) {
+                    Ok(c) => Some(PollSchedule::Cron(c)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "share-sync: cron 表达式 {:?} 无效，不启动轮询: {}",
+                            expr,
+                            e
+                        );
+                        None
+                    }
+                }
+            }
         }
     }
+}
+
+/// 解析并校验轮询用 cron 表达式：语法合法、能触发、相邻两次触发不少于最小轮询间隔
+pub fn parse_poll_cron(expr: &str) -> Result<CronSchedule, String> {
+    let cron = CronSchedule::parse(expr)?;
+    cron.check_min_gap(MIN_POLL_INTERVAL_SECS)?;
+    Ok(cron)
 }
 
 /// 一条订阅
@@ -286,6 +329,13 @@ impl ShareSubscription {
                     MIN_POLL_INTERVAL_SECS / 60
                 ));
             }
+        }
+        if matches!(self.poll_config.mode, PollMode::Cron) {
+            let expr = self.poll_config.cron_expr.as_deref().unwrap_or("").trim();
+            if expr.is_empty() {
+                return Err("Cron 模式下必须填写 cron 表达式".into());
+            }
+            parse_poll_cron(expr).map_err(|e| format!("cron 表达式无效：{}", e))?;
         }
         if let Some(h) = self.poll_config.schedule_hour {
             if h > 23 {
@@ -598,7 +648,11 @@ mod tests {
             ],
         );
         let err = sub.validate().unwrap_err();
-        assert!(err.contains("最多只能配置 1 个网盘目标"), "实际错误: {}", err);
+        assert!(
+            err.contains("最多只能配置 1 个网盘目标"),
+            "实际错误: {}",
+            err
+        );
     }
 
     #[test]
@@ -621,7 +675,11 @@ mod tests {
             ],
         );
         let err = sub.validate().unwrap_err();
-        assert!(err.contains("最多只能配置 1 个本地目标"), "实际错误: {}", err);
+        assert!(
+            err.contains("最多只能配置 1 个本地目标"),
+            "实际错误: {}",
+            err
+        );
     }
 
     #[test]
@@ -703,21 +761,91 @@ mod tests {
     fn test_poll_effective_interval_min() {
         let mut cfg = PollConfig::default();
         cfg.interval_secs = 60;
-        assert_eq!(cfg.effective_interval_secs(), MIN_POLL_INTERVAL_SECS);
+        assert_eq!(
+            cfg.schedule(),
+            Some(PollSchedule::Interval(MIN_POLL_INTERVAL_SECS))
+        );
     }
 
     #[test]
-    fn test_poll_disabled_returns_zero() {
+    fn test_poll_disabled_returns_none() {
         let mut cfg = PollConfig::default();
         cfg.enabled = false;
-        assert_eq!(cfg.effective_interval_secs(), 0);
+        assert_eq!(cfg.schedule(), None);
+        let mut cfg = PollConfig::default();
+        cfg.mode = PollMode::Disabled;
+        assert_eq!(cfg.schedule(), None);
     }
 
     #[test]
-    fn test_poll_scheduled_returns_24h() {
+    fn test_poll_scheduled_uses_configured_time() {
         let mut cfg = PollConfig::default();
         cfg.mode = PollMode::Scheduled;
-        assert_eq!(cfg.effective_interval_secs(), 86_400);
+        cfg.schedule_hour = Some(21);
+        cfg.schedule_minute = Some(15);
+        assert_eq!(
+            cfg.schedule(),
+            Some(PollSchedule::Cron(CronSchedule::daily(21, 15)))
+        );
+        // 未填时刻时回退到 03:00（与前端默认一致）
+        cfg.schedule_hour = None;
+        cfg.schedule_minute = None;
+        assert_eq!(
+            cfg.schedule(),
+            Some(PollSchedule::Cron(CronSchedule::daily(3, 0)))
+        );
+    }
+
+    #[test]
+    fn test_poll_cron_schedule() {
+        let mut cfg = PollConfig::default();
+        cfg.mode = PollMode::Cron;
+        cfg.cron_expr = Some("*/10 11-13 * * 6".into());
+        assert_eq!(
+            cfg.schedule(),
+            Some(PollSchedule::Cron(
+                CronSchedule::parse("*/10 11-13 * * 6").unwrap()
+            ))
+        );
+        // 无效 / 过密表达式不启动调度
+        cfg.cron_expr = Some("*/5 * * * *".into());
+        assert_eq!(cfg.schedule(), None);
+        cfg.cron_expr = None;
+        assert_eq!(cfg.schedule(), None);
+    }
+
+    #[test]
+    fn test_validate_cron_mode() {
+        let tmp = std::env::temp_dir();
+        let mut sub = ShareSubscription::new(
+            "t".into(),
+            "https://pan.baidu.com/s/1y7CluAbCdEfGh".into(),
+            vec![SyncTarget::Local(LocalTarget {
+                local_path: tmp,
+                conflict_strategy: None,
+                mode: LocalSyncMode::ShareDirect,
+            })],
+        );
+        sub.poll_config.mode = PollMode::Cron;
+        sub.poll_config.cron_expr = None;
+        assert!(sub.validate().unwrap_err().contains("必须填写"));
+        sub.poll_config.cron_expr = Some("* * * *".into());
+        assert!(sub.validate().unwrap_err().contains("cron 表达式无效"));
+        sub.poll_config.cron_expr = Some("*/5 * * * *".into());
+        assert!(sub.validate().unwrap_err().contains("过于频繁"));
+        sub.poll_config.cron_expr = Some("*/10 11-13 * * 6".into());
+        assert!(sub.validate().is_ok());
+    }
+
+    #[test]
+    fn test_poll_config_without_cron_field_deserializes() {
+        // 老版本持久化的订阅没有 cron_expr 字段
+        let cfg: PollConfig = serde_json::from_str(
+            r#"{"enabled":true,"mode":"interval","interval_secs":1800,"schedule_hour":null,"schedule_minute":null}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.cron_expr, None);
+        assert_eq!(cfg.mode, PollMode::Interval);
     }
 
     #[test]
@@ -785,6 +913,7 @@ mod tests {
                 interval_secs: 1800,
                 schedule_hour: Some(3),
                 schedule_minute: Some(30),
+                cron_expr: None,
             }),
             uid: Some(42),
         };

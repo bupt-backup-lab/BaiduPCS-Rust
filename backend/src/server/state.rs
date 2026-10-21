@@ -16,9 +16,9 @@ use crate::encryption::SnapshotManager;
 use crate::netdisk::{ClientPool, CloudDlMonitor, NetdiskClient};
 use crate::persistence::{
     cleanup_completed_tasks, cleanup_invalid_tasks, create_pre_migration_backup,
-    is_transient_sqlite_error, needs_pre_migration_backup, run_migration_matrix,
-    scan_recoverable_tasks, DownloadRecoveryInfo, PersistenceManager, TaskType,
-    TransferRecoveryInfo, UploadRecoveryInfo,
+    ensure_backup_version_recorded, is_transient_sqlite_error, needs_pre_migration_backup,
+    run_migration_matrix, scan_recoverable_tasks, DownloadRecoveryInfo, PersistenceManager,
+    TaskType, TransferRecoveryInfo, UploadRecoveryInfo,
 };
 use crate::server::websocket::WebSocketManager;
 use crate::share_sync::resolver::ShareSyncAccountResolver;
@@ -238,9 +238,23 @@ impl AppState {
             let real_wal_dir = resolve(&config.persistence.wal_dir);
             let session_path = config_dir.join("session.json");
             let accounts_path = config_dir.join("accounts.json");
-            if needs_pre_migration_backup(&config_dir, &real_db_path, &session_path, &accounts_path)
-            {
-                match create_pre_migration_backup(&config_dir, &real_db_path, &real_wal_dir).await {
+            // 每个程序版本备份一次：升级 / 降级后首次启动重新备份，只保留最近几份
+            let app_version = env!("CARGO_PKG_VERSION");
+            if needs_pre_migration_backup(
+                &config_dir,
+                &real_db_path,
+                &session_path,
+                &accounts_path,
+                app_version,
+            ) {
+                match create_pre_migration_backup(
+                    &config_dir,
+                    &real_db_path,
+                    &real_wal_dir,
+                    app_version,
+                )
+                .await
+                {
                     Ok(b) => info!(
                         "迁移前完整备份已创建于 {}（{} 项），如迁移异常可整目录还原",
                         b.dir.display(),
@@ -249,7 +263,9 @@ impl AppState {
                     Err(e) => warn!("迁移前备份创建失败（不阻塞启动）: {e:#}"),
                 }
             } else {
-                info!("跳过迁移前备份（已存在 pre_migration 备份或无既有数据）");
+                // 全新安装时记录版本，避免第二次启动被误判为升级而多备份一次
+                ensure_backup_version_recorded(&config_dir, app_version).await;
+                info!("跳过迁移前备份（版本 {app_version} 已备份或无既有数据）");
             }
         }
 
@@ -3216,6 +3232,11 @@ impl AppState {
             mgr.shutdown().await;
             info!("分享同步管理器已停止");
         }
+
+        // 文件夹快照有节流落盘，退出前把被节流挡下的欠账写掉，
+        // 否则最后几秒完成的文件会在重启后从文件夹计数里消失
+        self.folder_download_manager.flush_dirty_folders(true).await;
+        info!("文件夹快照已刷写");
 
         // 关闭持久化管理器
         let mut pm = self.persistence_manager.lock().await;
