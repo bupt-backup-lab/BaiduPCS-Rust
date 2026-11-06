@@ -12,36 +12,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: linux-x86_64
+          # 只保留 amd64 的 musl 版本
+          - platform: linux-x86_64-musl
             os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             archive: tar
             binary: baidu-netdisk-rust
-            use_cross: false
-          - platform: linux-arm64
+            use_zigbuild: true
+            
+          # 只保留 arm64 的 musl 版本
+          - platform: linux-arm64-musl
             os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             archive: tar
             binary: baidu-netdisk-rust
             use_zigbuild: true
-          - platform: macos-x86_64
-            os: macos-15
-            target: x86_64-apple-darwin
-            archive: zip
-            binary: baidu-netdisk-rust
-            use_cross: false
-          - platform: macos-arm64
-            os: macos-latest
-            target: aarch64-apple-darwin
-            archive: zip
-            binary: baidu-netdisk-rust
-            use_cross: false
-          - platform: windows-x86_64
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: zip
-            binary: baidu-netdisk-rust.exe
-            use_cross: false
+
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -66,7 +52,7 @@ jobs:
         working-directory: frontend
 
       - name: Install system dependencies (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-20.04'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev zip
 
       - name: Set up Rust toolchain
@@ -95,18 +81,11 @@ jobs:
           if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
             echo "Building with cargo-zigbuild for ${{ matrix.target }}..."
             # Enable OpenSSL vendored for cross-compilation to musl targets
-            # This tells openssl-sys to compile OpenSSL from source
             cargo zigbuild --release --target ${{ matrix.target }}
           else
             echo "Building with cargo for ${{ matrix.target }}..."
             cargo build --release --target ${{ matrix.target }}
           fi
-
-      - name: Set up Python (for zip packaging)
-        if: matrix.archive == 'zip'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
 
       - name: Prepare package
         shell: bash
@@ -123,72 +102,22 @@ jobs:
 
           cp -R frontend/dist "$PKG_DIR/frontend"
           mkdir -p "$PKG_DIR/config"
-          # 只放示例，不放 app.toml：首次启动时程序会自动生成默认配置；
-          # 若打包实际配置文件，用户解压覆盖升级时会把自己的配置（含 Web 访问密码开关）冲掉
           cp config/app.toml.example "$PKG_DIR/config/app.toml.example"
+          cp config/app.toml.example "$PKG_DIR/config/app.toml"
           cp README.md "$PKG_DIR/README.md"
 
           echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
 
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            ARCHIVE_PATH="release/${ARTIFACT_NAME}.zip"
-            # Try python3 first, fallback to python
-            if command -v python3 &> /dev/null; then
-              python3 -c "import os, shutil; artifact = os.environ['ARTIFACT_NAME']; shutil.make_archive(os.path.join('release', artifact), 'zip', 'release', artifact)"
-            else
-              python -c "import os, shutil; artifact = os.environ['ARTIFACT_NAME']; shutil.make_archive(os.path.join('release', artifact), 'zip', 'release', artifact)"
-            fi
-          else
-            ARCHIVE_PATH="release/${ARTIFACT_NAME}.tar.gz"
-            tar czf "$ARCHIVE_PATH" -C release "$ARTIFACT_NAME"
-          fi
-
+          # 剔除了 zip 分支逻辑，因为当前 matrix 只有 tar
+          ARCHIVE_PATH="release/${ARTIFACT_NAME}.tar.gz"
+          tar czf "$ARCHIVE_PATH" -C release "$ARTIFACT_NAME"
+          
           echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ARCHIVE_PATH }}
-          generate_release_notes: false
-          make_latest: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-docker-image:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker image
-        uses: docker/build-push-action@v5
-        id: build
-        with:
-          context: .
-          file: ./Dockerfile
-          push: false
-          tags: baidupcs-rust:${{ github.ref_name }}-amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          outputs: type=docker,dest=/tmp/BaiduPCS-Rust-${{ github.ref_name }}-amd64.tar
-
-      - name: Compress Docker image
-        run: |
-          cd /tmp
-          gzip BaiduPCS-Rust-${{ github.ref_name }}-amd64.tar
-          mv BaiduPCS-Rust-${{ github.ref_name }}-amd64.tar.gz BaiduPCS-Rust-${{ github.ref_name }}-amd64-docker.tar.gz
-          echo "DOCKER_IMAGE_PATH=/tmp/BaiduPCS-Rust-${{ github.ref_name }}-amd64-docker.tar.gz" >> $GITHUB_ENV
-
-      - name: Upload Docker image to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.DOCKER_IMAGE_PATH }}
           generate_release_notes: false
           make_latest: true
         env:
