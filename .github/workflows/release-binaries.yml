@@ -4,15 +4,23 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:   # 支持手动触发
+  workflow_dispatch:
 
 jobs:
-  build-and-release:
+  # ==========================================
+  # 阶段 1：并行编译，将产物暂存到 Artifacts
+  # ==========================================
+  build:
     strategy:
       fail-fast: false
       matrix:
-        include:            
-          # 只保留 arm64 的 musl 版本
+        include:
+          - platform: linux-x86_64-musl
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar
+            binary: baidu-netdisk-rust
+            use_zigbuild: true
           - platform: linux-arm64-musl
             os: ubuntu-latest
             target: aarch64-unknown-linux-musl
@@ -21,8 +29,6 @@ jobs:
             use_zigbuild: true
 
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout repository
@@ -51,3 +57,114 @@ jobs:
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.87.0
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        if: matrix.use_zigbuild == true
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild --version 0.21.8 --locked
+
+      - name: Build backend
+        shell: bash
+        env:
+          OPENSSL_STATIC: 1
+          OPENSSL_VENDORED: 1
+        run: |
+          set -e
+          cd backend
+          if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
+            echo "Building with cargo-zigbuild for ${{ matrix.target }}..."
+            cargo zigbuild --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Set up Python (for zip packaging)
+        if: matrix.archive == 'zip'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Prepare package
+        shell: bash
+        run: |
+          set -e
+          # 针对手动触发(非Tag)的情况，自动拼上短 Hash，防止覆盖
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="${GITHUB_REF_NAME}-$(echo ${GITHUB_SHA} | cut -c1-7)"
+          fi
+          
+          ARTIFACT_NAME=BaiduPCS-Rust-${VERSION}-${{ matrix.platform }}
+          export ARTIFACT_NAME
+          PKG_DIR=release/$ARTIFACT_NAME
+          mkdir -p "$PKG_DIR"
+
+          BIN_PATH="backend/target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          cp "$BIN_PATH" "$PKG_DIR/"
+          chmod +x "$PKG_DIR/${{ matrix.binary }}" || true
+
+          cp -R frontend/dist "$PKG_DIR/frontend"
+          mkdir -p "$PKG_DIR/config"
+          cp config/app.toml.example "$PKG_DIR/config/app.toml.example"
+          cp config/app.toml.example "$PKG_DIR/config/app.toml"
+          cp README.md "$PKG_DIR/README.md"
+
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            ARCHIVE_PATH="release/${ARTIFACT_NAME}.zip"
+            if command -v python3 &> /dev/null; then
+              python3 -c "import os, shutil; artifact = os.environ['ARTIFACT_NAME']; shutil.make_archive(os.path.join('release', artifact), 'zip', 'release', artifact)"
+            else
+              python -c "import os, shutil; artifact = os.environ['ARTIFACT_NAME']; shutil.make_archive(os.path.join('release', artifact), 'zip', 'release', artifact)"
+            fi
+            UPLOAD_FILE="${ARTIFACT_NAME}.zip"
+          else
+            ARCHIVE_PATH="release/${ARTIFACT_NAME}.tar.gz"
+            tar czf "$ARCHIVE_PATH" -C release "$ARTIFACT_NAME"
+            UPLOAD_FILE="${ARTIFACT_NAME}.tar.gz"
+          fi
+
+          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
+          echo "UPLOAD_FILE=$UPLOAD_FILE" >> $GITHUB_ENV
+
+      # 修改点：把压缩包上传到 GitHub Actions 的临时存储区 (Artifacts) 待命
+      - name: Upload to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.UPLOAD_FILE }}
+          path: ${{ env.ARCHIVE_PATH }}
+          retention-days: 1
+
+
+  # ==========================================
+  # 阶段 2：等待所有编译完成后，一口气打包发布
+  # ==========================================
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # 下载上一步所有平台编译好的产物，并放在同一个文件夹下
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: final-releases
+          merge-multiple: true
+          
+      - name: Display files to be released
+        run: ls -lh final-releases/
+
+      # 安全发布，彻底杜绝并发丢失问题
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: final-releases/*
+          # 如果是手动触发的运行，创建名为 dev-分支名 的 Release；如果是 tag 触发，则用原 tag
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.ref_name) }}
+          generate_release_notes: false
+          make_latest: ${{ github.ref_type == 'tag' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
