@@ -821,6 +821,13 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/v1", api_routes)
         .nest("/api/v1/web-auth", web_auth_routes)
         .route("/health", get(health_check))
+        // ====== 👇 新增的路由块：不走鉴权中间件，直接合并到主路由 ======
+        .merge(
+            axum::Router::new()
+                .route("/play/:token/*path", axum::routing::get(crate::server::handlers::play::play))
+                .with_state(app_state.clone())
+        )
+        // ====== 👆 新增结束 ======
         .fallback_service(static_service)
         .layer(middleware);
 
