@@ -5,7 +5,6 @@ use std::{
 };
 
 use axum::{
-    body::Body,
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -36,7 +35,7 @@ fn cache_put(path: String, url: String) {
 
 pub async fn play(
     State(state): State<AppState>,
-    headers: HeaderMap, // 接收 mpv 播放器发来的请求头
+    headers: HeaderMap,
     Path((token, path)): Path<(String, String)>,
 ) -> Response {
     let expect = match std::env::var("PLAY_TOKEN") {
@@ -49,7 +48,6 @@ pub async fn play(
 
     let path = format!("/{}", path.trim_start_matches('/'));
 
-    // 1. 获取百度真实直链
     let dlink = if let Some(url) = cache_get(&path) {
         url
     } else {
@@ -71,41 +69,43 @@ pub async fn play(
         }
     };
 
-    // 2. VPS 发起请求，伪装成百度网盘客户端
     let client = reqwest::Client::new();
+    // 修复点1：全换成纯字符串传参，避开版本冲突
     let mut req = client.get(&dlink)
-        .header(header::USER_AGENT, "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;");
+        .header("User-Agent", "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;");
 
-    // 【关键】：如果播放器拖拽了进度条，会发来 Range 头，我们需要把它转交给百度
+    // 修复点2：取出 axum 的值后，解析成纯字符串再给 reqwest
     if let Some(range) = headers.get(header::RANGE) {
-        req = req.header(header::RANGE, range);
+        if let Ok(range_str) = range.to_str() {
+            req = req.header("Range", range_str);
+        }
     }
 
-    // 3. 将百度的视频流直接“管线传输”给播放器
     match req.send().await {
         Ok(res) => {
-            let status = res.status();
-            let mut builder = Response::builder().status(status);
+            // 修复点3：把 reqwest 的状态码转成数字字面量
+            let status_code = res.status().as_u16();
+            let mut builder = Response::builder().status(status_code);
             
-            // 把百度的响应头透传回 mpv，告诉 mpv 视频有多大、支持拖拽
+            // 修复点4：把 reqwest 的头转成纯字符串，再塞回给 axum
             for (k, v) in res.headers() {
-                if k == header::CONTENT_TYPE 
-                    || k == header::CONTENT_LENGTH 
-                    || k == header::CONTENT_RANGE 
-                    || k == header::ACCEPT_RANGES 
+                let k_str = k.as_str();
+                if k_str == "content-type" 
+                    || k_str == "content-length" 
+                    || k_str == "content-range" 
+                    || k_str == "accept-ranges" 
                 {
-                    builder = builder.header(k.clone(), v.clone());
+                    if let Ok(v_str) = v.to_str() {
+                        builder = builder.header(k_str, v_str);
+                    }
                 }
             }
 
-            // 获取底层的字节流
             let stream = res.bytes_stream();
             
-            // 注意：BaiduPCS-Rust 目前应该使用的是 Axum 0.7
-            let body = Body::from_stream(stream); 
-            // ⚠️ 如果你在 GitHub Actions 编译时看到报错找不到 `from_stream`，
-            // 请把上面这句删掉，换成： let body = Body::wrap_stream(stream);
-
+            // 兼容写法：如果是较新版本的 axum
+            let body = axum::body::Body::from_stream(stream);
+            
             builder.body(body).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Err(e) => {
