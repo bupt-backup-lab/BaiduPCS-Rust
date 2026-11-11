@@ -4,35 +4,15 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
+  workflow_dispatch:   # 支持手动触发
 
 jobs:
   build-and-release:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: linux-x86_64-gnu
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive: tar
-            binary: baidu-netdisk-rust
-            use_cross: false
-
-          - platform: linux-x86_64-musl
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            archive: tar
-            binary: baidu-netdisk-rust
-            use_zigbuild: true
-
-          - platform: linux-arm64-gnu
-            os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            archive: tar
-            binary: baidu-netdisk-rust
-            use_zigbuild: true
-
+        include:            
+          # 只保留 arm64 的 musl 版本
           - platform: linux-arm64-musl
             os: ubuntu-latest
             target: aarch64-unknown-linux-musl
@@ -40,24 +20,6 @@ jobs:
             binary: baidu-netdisk-rust
             use_zigbuild: true
 
-          - platform: macos-x86_64
-            os: macos-15
-            target: x86_64-apple-darwin
-            archive: zip
-            binary: baidu-netdisk-rust
-            use_cross: false
-          - platform: macos-arm64
-            os: macos-latest
-            target: aarch64-apple-darwin
-            archive: zip
-            binary: baidu-netdisk-rust
-            use_cross: false
-          - platform: windows-x86_64
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: zip
-            binary: baidu-netdisk-rust.exe
-            use_cross: false
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -89,81 +51,3 @@ jobs:
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.87.0
-          targets: ${{ matrix.target }}
-
-      - name: Install cargo-zigbuild
-        if: matrix.use_zigbuild == true
-        run: |
-          pip3 install ziglang
-          # Pin to a version compatible with the pinned rustc (1.87); 0.23+ requires rustc 1.88
-          cargo install cargo-zigbuild --version 0.21.8 --locked
-          # Verify installation by checking if command exists
-          command -v cargo-zigbuild || which cargo-zigbuild || echo "cargo-zigbuild installed"
-
-      - name: Build backend
-        shell: bash
-        env:
-          OPENSSL_STATIC: 1
-          OPENSSL_VENDORED: 1
-        run: |
-          set -e
-          cd backend
-          if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
-            echo "Building with cargo-zigbuild for ${{ matrix.target }}..."
-            # Enable OpenSSL vendored for cross-compilation to musl targets
-            # This tells openssl-sys to compile OpenSSL from source
-            cargo zigbuild --release --target ${{ matrix.target }}
-          else
-            echo "Building with cargo for ${{ matrix.target }}..."
-            cargo build --release --target ${{ matrix.target }}
-          fi
-
-      - name: Set up Python (for zip packaging)
-        if: matrix.archive == 'zip'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Prepare package
-        shell: bash
-        run: |
-          set -e
-          ARTIFACT_NAME=BaiduPCS-Rust-${GITHUB_REF_NAME}-${{ matrix.platform }}
-          export ARTIFACT_NAME
-          PKG_DIR=release/$ARTIFACT_NAME
-          mkdir -p "$PKG_DIR"
-
-          BIN_PATH="backend/target/${{ matrix.target }}/release/${{ matrix.binary }}"
-          cp "$BIN_PATH" "$PKG_DIR/"
-          chmod +x "$PKG_DIR/${{ matrix.binary }}" || true
-
-          cp -R frontend/dist "$PKG_DIR/frontend"
-          mkdir -p "$PKG_DIR/config"
-          cp config/app.toml.example "$PKG_DIR/config/app.toml.example"
-          cp config/app.toml.example "$PKG_DIR/config/app.toml"
-          cp README.md "$PKG_DIR/README.md"
-
-          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
-
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            ARCHIVE_PATH="release/${ARTIFACT_NAME}.zip"
-            if command -v python3 &> /dev/null; then
-              python3 -c "import os, shutil; artifact = os.environ['ARTIFACT_NAME']; shutil.make_archive(os.path.join('release', artifact), 'zip', 'release', artifact)"
-            else
-              python -c "import os, shutil; artifact = os.environ['ARTIFACT_NAME']; shutil.make_archive(os.path.join('release', artifact), 'zip', 'release', artifact)"
-            fi
-          else
-            ARCHIVE_PATH="release/${ARTIFACT_NAME}.tar.gz"
-            tar czf "$ARCHIVE_PATH" -C release "$ARTIFACT_NAME"
-          fi
-
-          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
-
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.ARCHIVE_PATH }}
-          generate_release_notes: false
-          make_latest: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
