@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod auth;
 pub mod autobackup;
+pub mod play;
 pub mod budget;
 pub mod cloud_dl;
 pub mod common;
