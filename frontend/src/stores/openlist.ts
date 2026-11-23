@@ -130,7 +130,7 @@ export const useOpenListStore = defineStore('openList', () => {
       type: next === 'on' ? 'success' : next === 'observe' ? 'warning' : 'info',
       message: `OpenList 接管：${labelMap[next]}${
         next === 'on'
-          ? '\n同网盘内的 重命名/删除/移动/复制 改由 OpenList 执行'
+          ? '\n同网盘内的新建文件夹/重命名/删除/移动/复制 改由 OpenList 执行'
           : next === 'observe'
           ? '\n只提示，仍由 BaiduPCS 原生执行'
           : '\n全部走 BaiduPCS 原生接口'

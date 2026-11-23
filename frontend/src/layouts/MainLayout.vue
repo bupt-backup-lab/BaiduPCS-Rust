@@ -330,7 +330,7 @@ const openListModeTooltip = computed(() => {
   const mode = openListStore.config.takeoverMode || 'off'
   const desc =
     mode === 'on'
-      ? '接管模式：同网盘内的 重命名/删除/移动/复制 改由 OpenList 执行'
+      ? '接管模式：同网盘内的新建文件夹/重命名/删除/移动/复制 改由 OpenList 执行'
       : mode === 'observe'
       ? '观察模式：提示可接管的操作，仍由 BaiduPCS 原生执行'
       : '关闭：全部走 BaiduPCS 原生接口'

@@ -504,7 +504,7 @@ async fn call_openlist_api(
         let final_msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
         if final_code == 403 || final_msg.to_lowercase().contains("permission") {
             return Err(ApiError::BadRequest(format!(
-                "OpenList 用户权限不足（{}）。请在 OpenList 后台给该用户勾选对应操作权限（重命名/移动/复制/删除）。",
+                "OpenList 用户权限不足（{}）。请在 OpenList 后台给该用户勾选对应操作权限（新建文件夹/重命名/移动/复制/删除）。",
                 final_msg
             )));
         }
@@ -628,7 +628,7 @@ pub struct OpenListFileOpItem {
 /// POST /openlist/execute 操作接管执行请求体
 #[derive(Debug, Deserialize)]
 pub struct OpenListExecuteOpRequest {
-    /// 操作类型: "rename" | "delete" | "move" | "copy"
+    /// 操作类型: "mkdir" | "rename" | "delete" | "move" | "copy"
     pub op: String,
     /// 账号 UID
     #[serde(default)]
@@ -636,7 +636,7 @@ pub struct OpenListExecuteOpRequest {
     /// 账号用户名
     #[serde(default)]
     pub username: Option<String>,
-    /// rename 参数: 文件完整路径
+    /// mkdir / rename 参数: 文件夹或文件完整路径
     #[serde(default)]
     pub path: Option<String>,
     /// rename 参数: 新文件名
@@ -659,7 +659,7 @@ pub struct OpenListExecuteOpResponse {
 }
 
 /// POST /openlist/execute
-/// 由后端代理向 OpenList 发起 重命名 / 删除 / 移动 / 复制 操作接管执行
+/// 由后端代理向 OpenList 发起 新建文件夹 / 重命名 / 删除 / 移动 / 复制 操作接管执行
 pub async fn execute_openlist_op(
     State(app_state): State<AppState>,
     Json(req): Json<OpenListExecuteOpRequest>,
@@ -687,6 +687,42 @@ pub async fn execute_openlist_op(
     let task_id = rand::random::<u32>() as u64;
 
     match req.op.as_str() {
+        "mkdir" => {
+            let path = req.path.ok_or_else(|| ApiError::BadRequest("缺少 path 参数".to_string()))?;
+            let (parent, folder_name) = split_parent_and_name(&path);
+
+            let ol_path = to_openlist_path(&mount_path, &root_path, &path)?;
+            let ol_parent = to_openlist_path(&mount_path, &root_path, &parent)?;
+
+            let body = serde_json::json!({
+                "path": ol_path,
+            });
+
+            call_openlist_api(
+                &client,
+                &base_url,
+                "/api/fs/mkdir",
+                &mut token,
+                &cfg.username,
+                &cfg.password,
+                &body,
+                Some(&ol_parent),
+            )
+            .await?;
+
+            let desc = format!("新建文件夹「{}」", folder_name);
+
+            Ok(Json(ApiResponse::success(OpenListExecuteOpResponse {
+                success: true,
+                desc,
+                data: serde_json::json!({
+                    "fs_id": task_id,
+                    "path": path,
+                    "isdir": 1,
+                }),
+            })))
+        }
+
         "rename" => {
             let path = req.path.ok_or_else(|| ApiError::BadRequest("缺少 path 参数".to_string()))?;
             let new_name = req

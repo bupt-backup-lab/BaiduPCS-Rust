@@ -10,17 +10,19 @@ export interface TakeoverParams {
   paths?: string[]
   items?: FileOperationItem[]
   ondup?: string
+  path?: string
+  uid?: number | null
 }
 
 /**
  * 统一处理文件操作的 OpenList 接管逻辑
  *
- * @param op 操作类型: 'rename' | 'delete' | 'move' | 'copy'
+ * @param op 操作类型: 'rename' | 'delete' | 'move' | 'copy' | 'mkdir'
  * @param params 操作参数
  * @param nativeFn BaiduPCS 原生接口执行函数
  */
 export async function handleTakeoverOperation<T>(
-  op: 'rename' | 'delete' | 'move' | 'copy',
+  op: 'rename' | 'delete' | 'move' | 'copy' | 'mkdir',
   params: TakeoverParams,
   nativeFn: () => Promise<T>
 ): Promise<T> {
@@ -64,7 +66,12 @@ export async function handleTakeoverOperation<T>(
 
   // 3. 构建操作描述，并针对无法接管的情况做前置校验
   let desc = ''
-  if (op === 'rename') {
+  if (op === 'mkdir') {
+    const p = params.path
+    if (!p) return nativeFn()
+    const folderName = p.split('/').filter(Boolean).pop() || ''
+    desc = `${resolved.label}：新建文件夹「${folderName}」`
+  } else if (op === 'rename') {
     const item = params.item
     if (!item || !item.path) return nativeFn()
     const oldName = item.path.split('/').filter(Boolean).pop() || ''
@@ -116,9 +123,9 @@ export async function handleTakeoverOperation<T>(
 
     const res = await executeOpenListOpBackend({
       op,
-      uid: activeUid ?? undefined,
+      uid: (params.uid ?? activeUid) ?? undefined,
       username: activeAccount?.username || undefined,
-      path: params.item?.path,
+      path: params.path || params.item?.path,
       new_name: params.item?.newname,
       paths: params.paths,
       items: params.items,

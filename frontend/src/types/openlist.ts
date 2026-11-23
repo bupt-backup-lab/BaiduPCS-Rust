@@ -44,7 +44,7 @@ export interface OpenListFileOpItem {
 }
 
 export interface OpenListExecuteOpRequest {
-  op: 'rename' | 'delete' | 'move' | 'copy'
+  op: 'rename' | 'delete' | 'move' | 'copy' | 'mkdir'
   uid?: number
   username?: string
   path?: string

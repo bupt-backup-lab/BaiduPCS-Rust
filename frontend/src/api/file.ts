@@ -145,11 +145,7 @@ export async function getDownloadUrl(fsId: number): Promise<string> {
   return response.data.data.url
 }
 
-/**
- * 创建文件夹
- * @param uid 指定账号；缺省为活跃账号
- */
-export async function createFolder(path: string, uid?: number | null): Promise<CreateFolderData> {
+async function nativeCreateFolder(path: string, uid?: number | null): Promise<CreateFolderData> {
   const response = await apiClient.post<ApiResponse<CreateFolderData>>('/files/folder', {
     path,
     uid: uid ?? undefined,
@@ -160,6 +156,14 @@ export async function createFolder(path: string, uid?: number | null): Promise<C
   }
 
   return response.data.data
+}
+
+/**
+ * 创建文件夹（支持 OpenList 接管）
+ * @param uid 指定账号；缺省为活跃账号
+ */
+export async function createFolder(path: string, uid?: number | null): Promise<CreateFolderData> {
+  return handleTakeoverOperation('mkdir', { path, uid }, () => nativeCreateFolder(path, uid))
 }
 
 export interface DeleteFilesData {
