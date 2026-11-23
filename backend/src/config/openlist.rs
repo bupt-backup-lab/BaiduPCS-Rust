@@ -48,6 +48,7 @@ pub struct OpenListConfig {
     #[serde(default, alias = "fallbackMount")]
     pub fallback_mount: String,
     /// 操作接管模式: "off" (关闭), "observe" (观察), "on" (接管)
+    /// 开启接管后，同网盘内的新建文件夹/重命名/删除/移动/复制 操作将改由 OpenList 执行
     #[serde(default = "default_takeover_mode", alias = "takeoverMode")]
     pub takeover_mode: String,
     /// 账号挂载路径映射表：百度用户名或 UID -> 挂载配置

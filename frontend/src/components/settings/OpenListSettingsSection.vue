@@ -112,10 +112,10 @@
               <el-radio-button label="on">接管模式</el-radio-button>
             </el-radio-group>
             <div class="form-tip">
-              同网盘内的复制、移动、删除、重命名是否交由 OpenList 执行。<br />
+              同网盘内的新建文件夹、复制、移动、删除、重命名是否交由 OpenList 执行。<br />
               • <b>关闭</b>：所有操作均走 BaiduPCS 原生接口；<br />
               • <b>观察模式</b>：仅弹窗提醒该操作可由 OpenList 接管，仍走原生接口执行；<br />
-              • <b>接管模式</b>：真正改由 OpenList 执行，极大提高同盘文件重命名、删除与整理效率。<br />
+              • <b>接管模式</b>：真正改由 OpenList 执行，极大提高同盘文件整理效率并即时同步索引。<br />
               （提示：也可在页面顶栏点击 <code>OL·接管</code> / <code>OL·观察</code> 小标签随时一键快速切换）
             </div>
           </el-form-item>
