@@ -14,6 +14,7 @@ pub mod file;
 pub mod filesystem;
 pub mod folder_download;
 pub mod local_files;
+pub mod openlist;
 pub mod share;
 pub mod share_sync;
 pub mod system;
@@ -29,6 +30,7 @@ pub use file::*;
 // 只导出需要的函数，避免 ApiResponse 冲突
 pub use filesystem::{get_roots, goto_path, list_directory, validate_path};
 pub use folder_download::*;
+pub use openlist::*;
 pub use share::*;
 // 显式列出 share_sync 里的 handler 函数，避免导入 ApiResponse（避免与 auth/autobackup 冲突）
 pub use share_sync::{

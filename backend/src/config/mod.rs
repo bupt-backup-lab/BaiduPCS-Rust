@@ -2,6 +2,7 @@
 
 pub mod env_detector;
 pub mod mount_detector;
+pub mod openlist;
 pub mod path_validator;
 
 use anyhow::{Context, Result};
@@ -11,6 +12,7 @@ use tokio::fs;
 
 pub use env_detector::{EnvDetector, EnvInfo, OsType};
 pub use mount_detector::{MountDetector, MountPoint};
+pub use openlist::{OpenListAccountMapping, OpenListConfig};
 pub use path_validator::{PathValidationResult, PathValidator};
 
 // Re-export WebAuthConfig from web_auth module
@@ -78,6 +80,9 @@ pub struct AppConfig {
     /// 消息通知配置（Gotify / 通用 Webhook）；老配置缺该段时默认关闭
     #[serde(default)]
     pub notification: crate::notification::NotificationConfig,
+    /// OpenList 联动配置；老配置缺该段时默认关闭
+    #[serde(default)]
+    pub openlist: OpenListConfig,
 }
 
 // ============================================================================
@@ -1373,6 +1378,7 @@ impl Default for AppConfig {
             share_sync: ShareSyncConfig::default(),
             ui: UiConfig::default(),
             notification: crate::notification::NotificationConfig::default(),
+            openlist: OpenListConfig::default(),
         }
     }
 }

@@ -145,7 +145,14 @@ jobs:
 
           echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
 
+      - name: Upload Artifact (Action 页面可直接下载)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARCHIVE_PATH }}
+
       - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ARCHIVE_PATH }}
@@ -186,6 +193,7 @@ jobs:
           echo "DOCKER_IMAGE_PATH=/tmp/BaiduPCS-Rust-${{ github.ref_name }}-amd64-docker.tar.gz" >> $GITHUB_ENV
 
       - name: Upload Docker image to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.DOCKER_IMAGE_PATH }}

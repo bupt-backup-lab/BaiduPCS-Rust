@@ -268,6 +268,10 @@ pub async fn update_config(
         if raw.get("notification").is_none() {
             new_config.notification = guard.notification.clone();
         }
+        // 前端提交的整份配置若不含 openlist 段：保留服务端当前值，避免被默认值覆盖
+        if raw.get("openlist").is_none() {
+            new_config.openlist = guard.openlist.clone();
+        }
         if let Err(e) = new_config.notification.validate() {
             return Err(ApiError::BadRequest(format!("消息通知配置校验失败: {}", e)));
         }

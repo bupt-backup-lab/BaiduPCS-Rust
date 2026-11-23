@@ -109,6 +109,25 @@
           <el-icon><Download /></el-icon>
           分享直下
         </el-button>
+        <el-button
+            v-if="openListStore.config.enabled"
+            type="info"
+            @click="handleOpenListGoto"
+            title="在 OpenList 中打开当前目录"
+        >
+          <el-icon><TopRight /></el-icon>
+          跳转OL
+        </el-button>
+        <el-button
+            v-if="openListStore.config.enabled"
+            type="info"
+            :loading="openListRefreshing"
+            @click="handleOpenListRefresh"
+            title="刷新 OpenList 缓存（让 OpenList 重新读取网盘目录）"
+        >
+          <el-icon><RefreshRight /></el-icon>
+          刷新OL
+        </el-button>
         <el-button type="primary" @click="refreshFileList">
           <el-icon><Refresh /></el-icon>
           刷新
@@ -164,6 +183,25 @@
         </el-button>
         <el-button type="danger" circle @click="showShareDirectDownloadDialog = true" title="分享直下">
           <el-icon><Download /></el-icon>
+        </el-button>
+        <el-button
+            v-if="openListStore.config.enabled"
+            type="info"
+            circle
+            @click="handleOpenListGoto"
+            title="在 OpenList 中打开当前目录"
+        >
+          <el-icon><TopRight /></el-icon>
+        </el-button>
+        <el-button
+            v-if="openListStore.config.enabled"
+            type="info"
+            circle
+            :loading="openListRefreshing"
+            @click="handleOpenListRefresh"
+            title="刷新 OpenList 缓存"
+        >
+          <el-icon><RefreshRight /></el-icon>
         </el-button>
         <el-button type="primary" circle @click="refreshFileList">
           <el-icon><Refresh /></el-icon>
@@ -571,6 +609,18 @@
         </el-dropdown>
       </div>
     </div>
+
+    <!-- 剧集连播悬浮控制栏 -->
+    <EpisodePlayerBar
+      :visible="!!activeEpisodePlayback"
+      :filename="activeEpisodePlayback?.filename || ''"
+      :all-filenames="currentDir === activeEpisodePlayback?.dir ? fileList.map(f => f.server_filename) : (activeEpisodePlayback?.cachedFilenames || [])"
+      :play-mode="activeEpisodePlayback?.playMode || 'mpv'"
+      @close="handleEpisodeClose"
+      @switch="handleEpisodeSwitch"
+      @copy="handleEpisodeCopy"
+      @re-launch="handleEpisodeReLaunch"
+    />
   </div>
 </template>
 
@@ -579,6 +629,7 @@ import {ref, onMounted, onBeforeUnmount, computed, nextTick, watch} from 'vue'
 import {useRoute, useRouter} from 'vue-router'
 import {ElMessage, ElMessageBox} from 'element-plus'
 import type {InputInstance, TableInstance} from 'element-plus'
+import EpisodePlayerBar from '@/components/EpisodePlayerBar.vue'
 import {
   getFileList,
   searchFiles,
@@ -608,6 +659,7 @@ import CrossAccountTransferDialog from '@/components/CrossAccountTransferDialog.
 import type {CrossAccountJob, CrossAccountMode} from '@/api/crossAccount'
 import {useAuthStore} from '@/stores/auth'
 import {useUiPrefsStore} from '@/stores/uiPrefs'
+import {useOpenListStore} from '@/stores/openlist'
 import {
   CopyDocument as CopyDocumentIcon,
   Delete as DeleteIcon,
@@ -621,7 +673,23 @@ import {
   Switch as SwitchIcon,
   Refresh as RefreshIcon,
   Upload as UploadIcon,
+  VideoPlay as VideoPlayIcon,
+  DArrowLeft as DArrowLeftIcon,
+  DArrowRight as DArrowRightIcon,
+  Document as DocumentIcon,
 } from '@element-plus/icons-vue'
+import {
+  getOpenListDirectUrl,
+  getOpenListDirUrl,
+  copyDirectUrl,
+  launchMpv,
+  openInBrowser,
+  isMediaFile,
+  isVideoFile,
+  findNeighborEpisode,
+  formatEpisodeLabel,
+  refreshOpenListDir,
+} from '@/utils/openlist'
 import {useIsMobile} from '@/utils/responsive'
 import {createDownload, createFolderDownload, createBatchDownload, type BatchDownloadItem, type DownloadConflictStrategy} from '@/api/download'
 import {createUpload, createFolderUpload, type UploadConflictStrategy} from '@/api/upload'
@@ -639,6 +707,17 @@ const isMobile = useIsMobile()
 const route = useRoute()
 const router = useRouter()
 const uiPrefsStore = useUiPrefsStore()
+const openListStore = useOpenListStore()
+const openListRefreshing = ref(false)
+
+interface ActiveEpisodePlayback {
+  dir: string
+  filename: string
+  playMode: 'mpv' | 'browser'
+  cachedFilenames: string[]
+}
+
+const activeEpisodePlayback = ref<ActiveEpisodePlayback | null>(null)
 
 // 下载配置状态
 const downloadConfig = ref<DownloadConfig | null>(null)
@@ -2230,6 +2309,22 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       disabledReason: encryptedReason,
     })
   }
+  // OpenList 联动（单文件且开启联动时提供直链复制、MPV 串流、浏览器打开）
+  if (single && single.isdir === 0 && openListStore.config.enabled) {
+    const isMedia = isMediaFile(single.server_filename)
+    if (isMedia) {
+      items.push(
+        { key: 'openlist-mpv', label: 'MPV 播放', icon: VideoPlayIcon, divided: true },
+        { key: 'openlist-open', label: '浏览器打开', icon: DocumentIcon },
+        { key: 'openlist-copy', label: '复制 OpenList 链接', icon: LinkIcon }
+      )
+    } else {
+      items.push(
+        { key: 'openlist-open', label: '浏览器打开', icon: DocumentIcon, divided: true },
+        { key: 'openlist-copy', label: '复制 OpenList 链接', icon: LinkIcon }
+      )
+    }
+  }
   items.push({ key: 'delete', label: '删除', icon: DeleteIcon, divided: true, danger: true })
   return items
 })
@@ -2312,6 +2407,157 @@ function handleContextMenuSelect(key: string) {
     case 'refresh':
       refreshFileList()
       break
+    case 'openlist-copy': {
+      const activeUser = authStore.activeAccount || authStore.user
+      const res = getOpenListDirectUrl(activeUser, currentDir.value, first.server_filename, openListStore.config)
+      if (res.error) {
+        ElMessage.warning(res.error)
+      } else if (res.url) {
+        void copyDirectUrl(res.url)
+      }
+      break
+    }
+    case 'openlist-open': {
+      const activeUser = authStore.activeAccount || authStore.user
+      const res = getOpenListDirectUrl(activeUser, currentDir.value, first.server_filename, openListStore.config)
+      if (res.error) {
+        ElMessage.warning(res.error)
+      } else if (res.url) {
+        openInBrowser(res.url, first.size, first.server_filename)
+        if (isVideoFile(first.server_filename)) {
+          activeEpisodePlayback.value = {
+            dir: currentDir.value,
+            filename: first.server_filename,
+            playMode: 'browser',
+            cachedFilenames: fileList.value.map((f) => f.server_filename),
+          }
+        }
+      }
+      break
+    }
+    case 'openlist-mpv': {
+      const activeUser = authStore.activeAccount || authStore.user
+      const res = getOpenListDirectUrl(activeUser, currentDir.value, first.server_filename, openListStore.config)
+      if (res.error) {
+        ElMessage.warning(res.error)
+      } else if (res.url) {
+        launchMpv(res.url, first.size, first.server_filename, openListStore.config.desktopScheme)
+        if (isVideoFile(first.server_filename)) {
+          activeEpisodePlayback.value = {
+            dir: currentDir.value,
+            filename: first.server_filename,
+            playMode: 'mpv',
+            cachedFilenames: fileList.value.map((f) => f.server_filename),
+          }
+        }
+      }
+      break
+    }
+  }
+}
+
+function handleEpisodeClose() {
+  activeEpisodePlayback.value = null
+}
+
+function handleEpisodeSwitch(dir: -1 | 1) {
+  if (!activeEpisodePlayback.value) return
+  const currentPb = activeEpisodePlayback.value
+  const allNames =
+    currentDir.value === currentPb.dir
+      ? fileList.value.map((f) => f.server_filename)
+      : currentPb.cachedFilenames
+
+  const neighbor = findNeighborEpisode(allNames, currentPb.filename, dir)
+  if (neighbor.error) {
+    ElMessage.warning(neighbor.error)
+    return
+  }
+
+  if (neighbor.name) {
+    const activeUser = authStore.activeAccount || authStore.user
+    const res = getOpenListDirectUrl(activeUser, currentPb.dir, neighbor.name, openListStore.config)
+    if (res.error) {
+      ElMessage.warning(res.error)
+      return
+    }
+    if (res.url) {
+      const targetFile = fileList.value.find((f) => f.server_filename === neighbor.name)
+      const label = (neighbor.key ? formatEpisodeLabel(neighbor.key) + '：' : '') + neighbor.name
+      if (currentPb.playMode === 'mpv') {
+        launchMpv(res.url, targetFile?.size, label, openListStore.config.desktopScheme)
+      } else {
+        openInBrowser(res.url, targetFile?.size, label)
+      }
+      activeEpisodePlayback.value.filename = neighbor.name
+      ElMessage.success(`已切换至${dir > 0 ? '下一集' : '上一集'}：${label}`)
+    }
+  }
+}
+
+function handleEpisodeCopy() {
+  if (!activeEpisodePlayback.value) return
+  const activeUser = authStore.activeAccount || authStore.user
+  const res = getOpenListDirectUrl(
+    activeUser,
+    activeEpisodePlayback.value.dir,
+    activeEpisodePlayback.value.filename,
+    openListStore.config
+  )
+  if (res.error) {
+    ElMessage.warning(res.error)
+  } else if (res.url) {
+    void copyDirectUrl(res.url)
+  }
+}
+
+function handleEpisodeReLaunch() {
+  if (!activeEpisodePlayback.value) return
+  const currentPb = activeEpisodePlayback.value
+  const activeUser = authStore.activeAccount || authStore.user
+  const res = getOpenListDirectUrl(
+    activeUser,
+    currentPb.dir,
+    currentPb.filename,
+    openListStore.config
+  )
+  if (res.error) {
+    ElMessage.warning(res.error)
+    return
+  }
+  if (res.url) {
+    const targetFile = fileList.value.find((f) => f.server_filename === currentPb.filename)
+    if (currentPb.playMode === 'mpv') {
+      launchMpv(res.url, targetFile?.size, currentPb.filename, openListStore.config.desktopScheme)
+    } else {
+      openInBrowser(res.url, targetFile?.size, currentPb.filename)
+    }
+  }
+}
+
+function handleOpenListGoto() {
+  const activeUser = authStore.activeAccount || authStore.user
+  const res = getOpenListDirUrl(activeUser, currentDir.value, openListStore.config)
+  if (res.error) {
+    ElMessage.warning(res.error)
+  } else if (res.url) {
+    window.open(res.url, '_blank')
+    ElMessage.success('已在新标签页打开 OpenList 对应目录')
+  }
+}
+
+async function handleOpenListRefresh() {
+  if (openListRefreshing.value) return
+  openListRefreshing.value = true
+  try {
+    ElMessage.info('正在向 OpenList 发送刷新请求...')
+    const activeUser = authStore.activeAccount || authStore.user
+    const total = await refreshOpenListDir(activeUser, currentDir.value, openListStore.config)
+    ElMessage.success(`OpenList 目录缓存已刷新（共 ${total} 项）`)
+  } catch (e: any) {
+    ElMessage.error(e.message || '刷新 OpenList 失败')
+  } finally {
+    openListRefreshing.value = false
   }
 }
 
@@ -2322,7 +2568,7 @@ void joinPath
 
 <script lang="ts">
 // 图标导入
-export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Download, Share, Loading, Link, Delete, Search, Close, CopyDocument, Rank, Switch, Edit, MoreFilled, Operation} from '@element-plus/icons-vue'
+export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Download, Share, Loading, Link, Delete, Search, Close, CopyDocument, Rank, Switch, Edit, MoreFilled, Operation, TopRight, RefreshRight} from '@element-plus/icons-vue'
 </script>
 
 <style scoped lang="scss">
@@ -2391,8 +2637,13 @@ export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Dow
   .toolbar-buttons-mobile {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     flex-shrink: 0;
+
+    :deep(.el-button),
+    .el-button {
+      margin-left: 0 !important;
+    }
   }
 }
 
@@ -2628,16 +2879,26 @@ export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Dow
 // =====================
 .is-mobile {
   .breadcrumb-bar {
-    padding: 12px 16px;
+    padding: 10px 14px;
     flex-wrap: wrap;
+    gap: 8px;
   }
 
   // 只有搜索框展开/处于搜索结果时才让工具栏独占一整行（搜索框在下方铺满）；
   // 收起时保持原样，与面包屑同一行。
-  .toolbar-buttons-mobile.search-open {
-    flex-wrap: wrap;
-    width: 100%;
-    justify-content: flex-end;
+  .toolbar-buttons-mobile {
+    gap: 5px;
+
+    :deep(.el-button),
+    .el-button {
+      margin-left: 0 !important;
+    }
+
+    &.search-open {
+      flex-wrap: wrap;
+      width: 100%;
+      justify-content: flex-end;
+    }
   }
 
   .search-wrapper {
@@ -2777,9 +3038,10 @@ export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Dow
   .file-card-main {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
     flex: 1;
     min-width: 0;
+    margin-right: 8px;
   }
 
   .file-card-icon {
@@ -2826,9 +3088,16 @@ export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Dow
 
   .file-card-action {
     flex-shrink: 0;
-    margin-left: 12px;
+    margin-left: auto;
     display: flex;
-    gap: 8px;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+
+    :deep(.el-button),
+    .el-button {
+      margin-left: 0 !important;
+    }
   }
 }
 

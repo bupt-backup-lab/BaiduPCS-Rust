@@ -597,3 +597,46 @@ export async function testNotification(config?: NotificationConfig): Promise<Not
   // 两个渠道并发，单渠道超时上限 60s
   return apiClient.post('/config/notification/test', config ? { config } : {}, { timeout: 70000 })
 }
+
+// ============================================================================
+// OpenList 联动配置 API
+// ============================================================================
+
+import type { OpenListConfig } from '@/types/openlist'
+
+/**
+ * 获取 OpenList 联动配置
+ */
+export async function getOpenListConfig(): Promise<OpenListConfig> {
+  return apiClient.get('/config/openlist')
+}
+
+/**
+ * 保存 OpenList 联动配置至 app.toml
+ */
+export async function updateOpenListConfig(config: Partial<OpenListConfig>): Promise<OpenListConfig> {
+  return apiClient.put('/config/openlist', config)
+}
+
+/**
+ * 后端代理测试 OpenList 连通性
+ */
+export async function testOpenListBackend(req?: {
+  baseUrl?: string
+  username?: string
+  password?: string
+}): Promise<{ success: boolean; message: string }> {
+  return apiClient.post('/openlist/test', req || {}, { timeout: 20000 })
+}
+
+/**
+ * 后端代理触发 OpenList 目录强制刷新
+ */
+export async function refreshOpenListBackend(req: {
+  dir: string
+  uid?: number
+  username?: string
+}): Promise<{ success: boolean; total: number; message: string }> {
+  return apiClient.post('/openlist/refresh', req, { timeout: 30000 })
+}
+

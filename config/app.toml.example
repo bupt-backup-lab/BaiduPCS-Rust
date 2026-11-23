@@ -69,3 +69,31 @@ cleanup_on_failure = true
 # 默认关闭，避免误删用户数据
 cleanup_orphaned_on_startup = false
 
+# OpenList 联动配置
+# 用于在网盘界面直接复制 OpenList 直链、MPV 流媒体播放、连续剧连播及目录强制刷新
+[openlist]
+# 是否启用 OpenList 联动
+enabled = false
+
+# OpenList 服务访问地址（不带末尾斜杠）
+baseUrl = "https://openlist.example.com:11443"
+
+# OpenList 专用刷新账号与密码（需具有写入权限以触发刷新目录缓存）
+username = ""
+password = ""
+
+# 电脑端唤起 MPV 播放器的自定义协议（默认 mpvpcs）
+desktopScheme = "mpvpcs"
+
+# 未手动配置挂载路径时，是否自动按 "/{百度用户名}" 推导
+autoMountByUsername = true
+
+# 无法识别账号时的兜底挂载路径（留空表示不兜底）
+fallbackMount = ""
+
+# 各百度账号在 OpenList 上的挂载路径映射（可选）
+# [openlist.accounts."12345678"]
+# mount = "/HKU慕容"
+# root = "/"
+
+
