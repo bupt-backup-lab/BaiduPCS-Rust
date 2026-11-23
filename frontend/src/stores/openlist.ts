@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { OpenListConfig } from '@/types/openlist'
+import { ElMessage } from 'element-plus'
+import type { OpenListConfig, OpenListTakeoverMode } from '@/types/openlist'
 import { getOpenListConfig, updateOpenListConfig } from '@/api/config'
 
 const STORAGE_KEY = 'pcs_openlist_config'
@@ -14,6 +15,7 @@ const DEFAULT_CONFIG: OpenListConfig = {
   desktopScheme: 'mpvpcs',
   autoMountByUsername: true,
   fallbackMount: '',
+  takeoverMode: 'observe',
   accounts: {},
 }
 
@@ -108,6 +110,36 @@ export const useOpenListStore = defineStore('openList', () => {
     return saveConfig()
   }
 
+  function setTakeoverMode(mode: OpenListTakeoverMode) {
+    config.value.takeoverMode = mode
+    return saveConfig({ takeoverMode: mode })
+  }
+
+  function cycleTakeoverMode(): OpenListTakeoverMode {
+    const order: OpenListTakeoverMode[] = ['off', 'observe', 'on']
+    const current = config.value.takeoverMode || 'off'
+    const next = order[(order.indexOf(current) + 1) % 3]
+    config.value.takeoverMode = next
+    void saveConfig({ takeoverMode: next })
+    const labelMap: Record<OpenListTakeoverMode, string> = {
+      off: '关闭',
+      observe: '观察模式',
+      on: '接管模式',
+    }
+    ElMessage({
+      type: next === 'on' ? 'success' : next === 'observe' ? 'warning' : 'info',
+      message: `OpenList 接管：${labelMap[next]}${
+        next === 'on'
+          ? '\n同网盘内的 重命名/删除/移动/复制 改由 OpenList 执行'
+          : next === 'observe'
+          ? '\n只提示，仍由 BaiduPCS 原生执行'
+          : '\n全部走 BaiduPCS 原生接口'
+      }`,
+      duration: 3500,
+    })
+    return next
+  }
+
   // 初始自动从后端加载配置
   void loadConfig()
 
@@ -118,5 +150,7 @@ export const useOpenListStore = defineStore('openList', () => {
     saveConfig,
     setAccountMapping,
     removeAccountMapping,
+    setTakeoverMode,
+    cycleTakeoverMode,
   }
 })

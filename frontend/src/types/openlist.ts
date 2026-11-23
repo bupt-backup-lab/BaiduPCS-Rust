@@ -11,6 +11,9 @@ export interface OpenListAccountMapping {
   base?: string
 }
 
+/** 操作接管模式: "off" (关闭), "observe" (观察), "on" (接管) */
+export type OpenListTakeoverMode = 'off' | 'observe' | 'on'
+
 export interface OpenListConfig {
   /** 是否启用 OpenList 联动 */
   enabled: boolean
@@ -28,6 +31,30 @@ export interface OpenListConfig {
   autoMountByUsername: boolean
   /** 无法识别账号时的兜底挂载路径 */
   fallbackMount: string
+  /** 操作接管模式: "off" (关闭), "observe" (观察), "on" (接管) */
+  takeoverMode: OpenListTakeoverMode
   /** 账号挂载路径映射表：百度用户名或 UID -> 挂载配置 */
   accounts: Record<string, OpenListAccountMapping>
+}
+
+export interface OpenListFileOpItem {
+  path: string
+  dest: string
+  newname?: string
+}
+
+export interface OpenListExecuteOpRequest {
+  op: 'rename' | 'delete' | 'move' | 'copy'
+  uid?: number
+  username?: string
+  path?: string
+  new_name?: string
+  paths?: string[]
+  items?: OpenListFileOpItem[]
+}
+
+export interface OpenListExecuteOpResponse<T = any> {
+  success: boolean
+  desc: string
+  data: T
 }

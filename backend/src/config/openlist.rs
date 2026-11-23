@@ -47,9 +47,16 @@ pub struct OpenListConfig {
     /// 无法识别账号时的兜底挂载路径
     #[serde(default, alias = "fallbackMount")]
     pub fallback_mount: String,
+    /// 操作接管模式: "off" (关闭), "observe" (观察), "on" (接管)
+    #[serde(default = "default_takeover_mode", alias = "takeoverMode")]
+    pub takeover_mode: String,
     /// 账号挂载路径映射表：百度用户名或 UID -> 挂载配置
     #[serde(default)]
     pub accounts: HashMap<String, OpenListAccountMapping>,
+}
+
+fn default_takeover_mode() -> String {
+    "observe".to_string()
 }
 
 fn default_true() -> bool {
@@ -70,6 +77,7 @@ impl Default for OpenListConfig {
             desktop_scheme: default_desktop_scheme(),
             auto_mount_by_username: true,
             fallback_mount: String::new(),
+            takeover_mode: default_takeover_mode(),
             accounts: HashMap::new(),
         }
     }

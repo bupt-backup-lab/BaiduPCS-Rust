@@ -105,6 +105,21 @@
             </el-col>
           </el-row>
 
+          <el-form-item label="文件操作接管模式">
+            <el-radio-group v-model="form.takeoverMode">
+              <el-radio-button label="off">关闭</el-radio-button>
+              <el-radio-button label="observe">观察模式</el-radio-button>
+              <el-radio-button label="on">接管模式</el-radio-button>
+            </el-radio-group>
+            <div class="form-tip">
+              同网盘内的复制、移动、删除、重命名是否交由 OpenList 执行。<br />
+              • <b>关闭</b>：所有操作均走 BaiduPCS 原生接口；<br />
+              • <b>观察模式</b>：仅弹窗提醒该操作可由 OpenList 接管，仍走原生接口执行；<br />
+              • <b>接管模式</b>：真正改由 OpenList 执行，极大提高同盘文件重命名、删除与整理效率。<br />
+              （提示：也可在页面顶栏点击 <code>OL·接管</code> / <code>OL·观察</code> 小标签随时一键快速切换）
+            </div>
+          </el-form-item>
+
           <!-- 账号挂载对应关系 -->
           <el-divider content-position="left">
             <el-icon><User /></el-icon> 百度账号 ↔ OpenList 存储挂载点对应表
@@ -199,6 +214,7 @@ const form = ref<OpenListConfig>({
   desktopScheme: 'mpvpcs',
   autoMountByUsername: true,
   fallbackMount: '',
+  takeoverMode: 'observe',
   accounts: {},
 })
 
