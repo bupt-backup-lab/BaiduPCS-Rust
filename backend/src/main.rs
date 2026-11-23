@@ -510,6 +510,20 @@ async fn main() -> anyhow::Result<()> {
             "/config/notification/test",
             post(handlers::test_notification),
         )
+        // 🔥 OpenList 联动配置与代理 API
+        .route(
+            "/config/openlist",
+            get(handlers::openlist::get_openlist_config)
+                .put(handlers::openlist::update_openlist_config),
+        )
+        .route(
+            "/openlist/test",
+            post(handlers::openlist::test_openlist_connection),
+        )
+        .route(
+            "/openlist/refresh",
+            post(handlers::openlist::refresh_openlist_dir),
+        )
         // 🔥 多账号资源配额 API
         .route("/budget", get(handlers::budget::get_budget))
         .route(

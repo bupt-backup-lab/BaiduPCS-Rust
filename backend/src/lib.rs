@@ -60,7 +60,7 @@ pub mod notification;
 
 // 导出常用类型
 pub use auth::{LoginRequest, LoginResponse, QRCode, QRCodeStatus, UserAuth};
-pub use config::AppConfig;
+pub use config::{AppConfig, OpenListAccountMapping, OpenListConfig};
 pub use downloader::{DownloadManager, DownloadTask, TaskStatus};
 pub use netdisk::{FileItem, NetdiskClient};
 pub use server::AppState;

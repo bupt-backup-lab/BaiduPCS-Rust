@@ -565,6 +565,11 @@
                   </el-form-item>
                 </el-card>
 
+                <!-- OpenList 联动 -->
+                <div id="section-openlist">
+                  <OpenListSettingsSection />
+                </div>
+
                 <!-- 加密设置 -->
                 <el-card id="section-encryption" class="setting-card" shadow="hover">
                   <template #header>
@@ -1143,6 +1148,7 @@ import { FilePickerModal } from '@/components/FilePicker'
 import AuthSettingsSection from '@/components/settings/AuthSettingsSection.vue'
 import AccountManagementSection from '@/components/settings/AccountManagementSection.vue'
 import NotificationSettingsSection from '@/components/settings/NotificationSettingsSection.vue'
+import OpenListSettingsSection from '@/components/settings/OpenListSettingsSection.vue'
 import BudgetPanel from '@/views/settings/BudgetPanel.vue'
 import ExcludeRuleHelp from '@/components/ExcludeRuleHelp.vue'
 import {
@@ -1340,6 +1346,7 @@ const navItems = [
   { id: 'section-conflict', label: '冲突策略', color: '#f56c6c' },
   { id: 'section-transfer', label: '转存', color: '#909399' },
   { id: 'section-sharesync', label: '分享同步', color: '#67c23a' },
+  { id: 'section-openlist', label: 'OpenList 联动', color: '#409eff' },
   { id: 'section-encryption', label: '加密', color: '#f56c6c' },
   { id: 'section-backup', label: '自动备份', color: '#67c23a' },
   { id: 'section-proxy', label: '网络代理', color: '#9b59b6' },
