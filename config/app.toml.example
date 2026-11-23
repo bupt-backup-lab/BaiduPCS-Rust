@@ -91,6 +91,10 @@ autoMountByUsername = true
 # 无法识别账号时的兜底挂载路径（留空表示不兜底）
 fallbackMount = ""
 
+# 操作接管模式: "off" (关闭), "observe" (观察), "on" (接管)
+# 开启接管后，同网盘内的 重命名/删除/移动/复制 操作将改由 OpenList 执行
+takeoverMode = "observe"
+
 # 各百度账号在 OpenList 上的挂载路径映射（可选）
 # [openlist.accounts."12345678"]
 # mount = "/HKU慕容"

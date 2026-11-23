@@ -524,6 +524,10 @@ async fn main() -> anyhow::Result<()> {
             "/openlist/refresh",
             post(handlers::openlist::refresh_openlist_dir),
         )
+        .route(
+            "/openlist/execute",
+            post(handlers::openlist::execute_openlist_op),
+        )
         // 🔥 多账号资源配额 API
         .route("/budget", get(handlers::budget::get_budget))
         .route(

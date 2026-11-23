@@ -2,6 +2,7 @@
 
 import axios from 'axios'
 import { formatFileSize as sharedFormatFileSize, formatTimestamp } from './utils'
+import { handleTakeoverOperation } from '@/utils/openlistTakeover'
 
 // 本地存储键名（与 webAuth store 保持一致）
 const WEB_AUTH_ACCESS_TOKEN_KEY = 'web_auth_access_token'
@@ -166,10 +167,7 @@ export interface DeleteFilesData {
   failed_paths: string[]
 }
 
-/**
- * 删除文件
- */
-export async function deleteFiles(paths: string[]): Promise<DeleteFilesData> {
+async function nativeDeleteFiles(paths: string[]): Promise<DeleteFilesData> {
   const response = await apiClient.post<ApiResponse<DeleteFilesData>>('/files/delete', {
     paths
   })
@@ -181,6 +179,13 @@ export async function deleteFiles(paths: string[]): Promise<DeleteFilesData> {
   }
 
   return response.data.data
+}
+
+/**
+ * 删除文件（支持 OpenList 接管）
+ */
+export async function deleteFiles(paths: string[]): Promise<DeleteFilesData> {
+  return handleTakeoverOperation('delete', { paths }, () => nativeDeleteFiles(paths))
 }
 
 export interface SearchData {
@@ -319,8 +324,12 @@ export type FileOperationOutcomeDto =
   failed_items?: FileOperationFailedItem[]
 }
 
+async function nativeCopyFiles(items: FileOperationItem[], ondup?: OnDup): Promise<FileOperationOutcomeDto> {
+  return longPollClient.post('/files/copy', ondup ? { items, ondup } : { items })
+}
+
 /**
- * 批量复制文件
+ * 批量复制文件（支持 OpenList 接管）
  *
  * 路径必须以 `/` 开头；`newname` 由前端先经 `validateFilename` 校验。
  * 返回值的 `kind` 字段用于区分业务成功/失败；网络层错误才会 reject。
@@ -329,21 +338,29 @@ export type FileOperationOutcomeDto =
  * `error_code=-8` 列出，其余照常完成。
  */
 export async function copyFiles(items: FileOperationItem[], ondup?: OnDup): Promise<FileOperationOutcomeDto> {
-  return longPollClient.post('/files/copy', ondup ? { items, ondup } : { items })
+  return handleTakeoverOperation('copy', { items, ondup }, () => nativeCopyFiles(items, ondup))
 }
 
-/**
- * 批量移动文件（`ondup` 语义同 `copyFiles`）
- */
-export async function moveFiles(items: FileOperationItem[], ondup?: OnDup): Promise<FileOperationOutcomeDto> {
+async function nativeMoveFiles(items: FileOperationItem[], ondup?: OnDup): Promise<FileOperationOutcomeDto> {
   return longPollClient.post('/files/move', ondup ? { items, ondup } : { items })
 }
 
 /**
- * 重命名单个文件 / 文件夹
+ * 批量移动文件（支持 OpenList 接管，`ondup` 语义同 `copyFiles`）
+ */
+export async function moveFiles(items: FileOperationItem[], ondup?: OnDup): Promise<FileOperationOutcomeDto> {
+  return handleTakeoverOperation('move', { items, ondup }, () => nativeMoveFiles(items, ondup))
+}
+
+async function nativeRenameFile(item: RenameItem): Promise<FileOperationOutcomeDto> {
+  return longPollClient.post('/files/rename', { item })
+}
+
+/**
+ * 重命名单个文件 / 文件夹（支持 OpenList 接管）
  */
 export async function renameFile(item: RenameItem): Promise<FileOperationOutcomeDto> {
-  return longPollClient.post('/files/rename', { item })
+  return handleTakeoverOperation('rename', { item }, () => nativeRenameFile(item))
 }
 
 /**

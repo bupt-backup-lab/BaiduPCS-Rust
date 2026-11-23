@@ -602,7 +602,11 @@ export async function testNotification(config?: NotificationConfig): Promise<Not
 // OpenList 联动配置 API
 // ============================================================================
 
-import type { OpenListConfig } from '@/types/openlist'
+import type {
+  OpenListConfig,
+  OpenListExecuteOpRequest,
+  OpenListExecuteOpResponse,
+} from '@/types/openlist'
 
 /**
  * 获取 OpenList 联动配置
@@ -639,4 +643,14 @@ export async function refreshOpenListBackend(req: {
 }): Promise<{ success: boolean; total: number; message: string }> {
   return apiClient.post('/openlist/refresh', req, { timeout: 30000 })
 }
+
+/**
+ * 后端代理执行 OpenList 操作接管（重命名/删除/移动/复制）
+ */
+export async function executeOpenListOpBackend<T = any>(
+  req: OpenListExecuteOpRequest
+): Promise<OpenListExecuteOpResponse<T>> {
+  return apiClient.post('/openlist/execute', req, { timeout: 45000 })
+}
+
 

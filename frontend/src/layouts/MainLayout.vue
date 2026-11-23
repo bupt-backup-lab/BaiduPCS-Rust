@@ -209,6 +209,17 @@
         </div>
 
         <div class="header-right">
+          <!-- OpenList 操作接管快捷状态标签 -->
+          <div
+              v-if="openListStore.config.enabled"
+              class="openlist-mode-chip"
+              :class="`mode-${openListStore.config.takeoverMode || 'off'}`"
+              :title="openListModeTooltip"
+              @click="openListStore.cycleTakeoverMode"
+          >
+            OL·{{ openListModeLabel }}
+          </div>
+
           <!-- 多账号横向快捷切换条（系统设置 → 界面偏好 开启；移动端空间不足不显示） -->
           <AccountQuickBar v-if="showAccountQuickBar" class="account-quick-bar-slot" />
           <!--
@@ -281,6 +292,7 @@ import MenuTransferProgress from '@/components/MenuTransferProgress.vue'
 import VipAvatar from '@/components/VipAvatar.vue'
 import { useTaskSummaryStore, type TransferIndicator } from '@/stores/taskSummary'
 import { useUiPrefsStore } from '@/stores/uiPrefs'
+import { useOpenListStore } from '@/stores/openlist'
 import {
   FolderOpened,
   Folder,
@@ -304,7 +316,26 @@ const router = useRouter()
 const authStore = useAuthStore()
 const webAuthStore = useWebAuthStore()
 const taskSummaryStore = useTaskSummaryStore()
+const openListStore = useOpenListStore()
 const { downloadIndicator, uploadIndicator } = storeToRefs(taskSummaryStore)
+
+const openListModeLabel = computed(() => {
+  const mode = openListStore.config.takeoverMode || 'off'
+  if (mode === 'on') return '接管'
+  if (mode === 'observe') return '观察'
+  return '关闭'
+})
+
+const openListModeTooltip = computed(() => {
+  const mode = openListStore.config.takeoverMode || 'off'
+  const desc =
+    mode === 'on'
+      ? '接管模式：同网盘内的 重命名/删除/移动/复制 改由 OpenList 执行'
+      : mode === 'observe'
+      ? '观察模式：提示可接管的操作，仍由 BaiduPCS 原生执行'
+      : '关闭：全部走 BaiduPCS 原生接口'
+  return `OpenList 操作接管（当前：${desc}）。点击切换：关闭 → 观察 → 接管`
+})
 
 const uiPrefsStore = useUiPrefsStore()
 
@@ -562,6 +593,41 @@ watch(
     gap: 12px;
     min-width: 0;
     margin-left: 16px;
+
+    .openlist-mode-chip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+      flex-shrink: 0;
+      font-size: 12px;
+      line-height: 1;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-weight: 600;
+      transition: all 0.2s ease;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+
+      &:hover {
+        transform: translateY(-1px);
+        filter: brightness(1.1);
+      }
+
+      &.mode-off {
+        background-color: #909399;
+      }
+
+      &.mode-observe {
+        background-color: #e6a23c;
+      }
+
+      &.mode-on {
+        background-color: #67c23a;
+      }
+    }
 
     .account-quick-bar-slot {
       flex: 0 1 auto;
