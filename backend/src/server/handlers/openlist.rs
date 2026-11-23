@@ -11,7 +11,7 @@ use axum::{extract::State, response::Json};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 
 /// OpenList 配置响应（密码脱敏）
 #[derive(Debug, Serialize)]
