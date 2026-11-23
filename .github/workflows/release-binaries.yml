@@ -1,10 +1,9 @@
 name: Release Multi-Platform Binaries
 
 on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:   # 支持手动触发
+  release:
+    types: [published]
+  workflow_dispatch:   # 支持在 GitHub Actions 页面手动触发构建
 
 jobs:
   build-and-release:
@@ -12,13 +11,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: linux-x86_64
+          - platform: linux-x86_64-musl
             os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             archive: tar
             binary: baidu-netdisk-rust
-            use_cross: false
-          - platform: linux-arm64
+            use_zigbuild: true
+          - platform: linux-arm64-musl
             os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             archive: tar
@@ -94,8 +93,6 @@ jobs:
           cd backend
           if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
             echo "Building with cargo-zigbuild for ${{ matrix.target }}..."
-            # Enable OpenSSL vendored for cross-compilation to musl targets
-            # This tells openssl-sys to compile OpenSSL from source
             cargo zigbuild --release --target ${{ matrix.target }}
           else
             echo "Building with cargo for ${{ matrix.target }}..."
@@ -132,7 +129,6 @@ jobs:
 
           if [ "${{ matrix.archive }}" = "zip" ]; then
             ARCHIVE_PATH="release/${ARTIFACT_NAME}.zip"
-            # Try python3 first, fallback to python
             if command -v python3 &> /dev/null; then
               python3 -c "import os, shutil; artifact = os.environ['ARTIFACT_NAME']; shutil.make_archive(os.path.join('release', artifact), 'zip', 'release', artifact)"
             else
@@ -152,51 +148,10 @@ jobs:
           path: ${{ env.ARCHIVE_PATH }}
 
       - name: Upload to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ARCHIVE_PATH }}
-          generate_release_notes: false
-          make_latest: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-docker-image:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker image
-        uses: docker/build-push-action@v5
-        id: build
-        with:
-          context: .
-          file: ./Dockerfile
-          push: false
-          tags: baidupcs-rust:${{ github.ref_name }}-amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          outputs: type=docker,dest=/tmp/BaiduPCS-Rust-${{ github.ref_name }}-amd64.tar
-
-      - name: Compress Docker image
-        run: |
-          cd /tmp
-          gzip BaiduPCS-Rust-${{ github.ref_name }}-amd64.tar
-          mv BaiduPCS-Rust-${{ github.ref_name }}-amd64.tar.gz BaiduPCS-Rust-${{ github.ref_name }}-amd64-docker.tar.gz
-          echo "DOCKER_IMAGE_PATH=/tmp/BaiduPCS-Rust-${{ github.ref_name }}-amd64-docker.tar.gz" >> $GITHUB_ENV
-
-      - name: Upload Docker image to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.DOCKER_IMAGE_PATH }}
           generate_release_notes: false
           make_latest: true
         env:
