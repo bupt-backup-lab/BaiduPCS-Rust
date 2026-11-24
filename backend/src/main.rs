@@ -528,6 +528,14 @@ async fn main() -> anyhow::Result<()> {
             "/openlist/execute",
             post(handlers::openlist::execute_openlist_op),
         )
+        .route(
+            "/openlist/fs/call",
+            post(handlers::openlist::openlist_fs_call),
+        )
+        .route(
+            "/openlist/tmdb/proxy",
+            post(handlers::openlist::openlist_tmdb_proxy),
+        )
         // 🔥 多账号资源配额 API
         .route("/budget", get(handlers::budget::get_budget))
         .route(
