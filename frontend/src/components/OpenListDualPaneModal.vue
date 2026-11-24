@@ -824,7 +824,7 @@ async function renderPane(side: 'left' | 'right', forceRefresh = false) {
   panes[side].selectedNames.clear()
 
   try {
-    const res = await callOpenListFsBackend<{ content?: OpenListItem[]; total?: number }>(
+    const res = await callOpenListFsBackend<any>(
       '/api/fs/list',
       {
         path: panes[side].path,
@@ -834,7 +834,17 @@ async function renderPane(side: 'left' | 'right', forceRefresh = false) {
         refresh: forceRefresh,
       }
     )
-    const list = res?.content || []
+    let rawList: any[] = []
+    if (Array.isArray(res)) {
+      rawList = res
+    } else if (Array.isArray(res?.data?.content)) {
+      rawList = res.data.content
+    } else if (Array.isArray(res?.content)) {
+      rawList = res.content
+    } else if (Array.isArray(res?.data)) {
+      rawList = res.data
+    }
+    const list: OpenListItem[] = [...rawList]
     list.sort((a, b) =>
       a.is_dir !== b.is_dir
         ? b.is_dir
