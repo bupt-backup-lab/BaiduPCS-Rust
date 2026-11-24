@@ -24,7 +24,7 @@ jobs:
             binary: baidu-netdisk-rust
             use_zigbuild: true
           - platform: macos-x86_64
-            os: macos-15
+            os: macos-13
             target: x86_64-apple-darwin
             archive: zip
             binary: baidu-netdisk-rust
@@ -38,6 +38,12 @@ jobs:
           - platform: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+            archive: zip
+            binary: baidu-netdisk-rust.exe
+            use_cross: false
+          - platform: windows-arm64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
             archive: zip
             binary: baidu-netdisk-rust.exe
             use_cross: false
