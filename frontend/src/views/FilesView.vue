@@ -2477,7 +2477,17 @@ function handleContextMenuSelect(key: string) {
           first.server_filename,
           fileList.value.map((f) => f.server_filename)
         )
-        launchMpv(res.url, first.size, first.server_filename, openListStore.config.desktopScheme, subUrls)
+        launchMpv(
+          res.url,
+          first.size,
+          first.server_filename,
+          openListStore.config.desktopScheme,
+          subUrls,
+          {
+            androidPackage: openListStore.config.androidPackage,
+            iosScheme: openListStore.config.iosScheme,
+          }
+        )
         if (isVideoFile(first.server_filename)) {
           activeEpisodePlayback.value = {
             dir: currentDir.value,
@@ -2533,7 +2543,17 @@ function handleEpisodeSwitch(dir: -1 | 1) {
       const label = (neighbor.key ? formatEpisodeLabel(neighbor.key) + '：' : '') + neighbor.name
       if (currentPb.playMode === 'mpv') {
         const subUrls = getOpenListSubUrlsForFile(currentPb.dir, neighbor.name, allNames)
-        launchMpv(res.url, targetFile?.size, label, openListStore.config.desktopScheme, subUrls)
+        launchMpv(
+          res.url,
+          targetFile?.size,
+          label,
+          openListStore.config.desktopScheme,
+          subUrls,
+          {
+            androidPackage: openListStore.config.androidPackage,
+            iosScheme: openListStore.config.iosScheme,
+          }
+        )
       } else {
         openInBrowser(res.url, targetFile?.size, label)
       }
@@ -2581,7 +2601,17 @@ function handleEpisodeReLaunch() {
           ? fileList.value.map((f) => f.server_filename)
           : currentPb.cachedFilenames
       const subUrls = getOpenListSubUrlsForFile(currentPb.dir, currentPb.filename, allNames)
-      launchMpv(res.url, targetFile?.size, currentPb.filename, openListStore.config.desktopScheme, subUrls)
+      launchMpv(
+        res.url,
+        targetFile?.size,
+        currentPb.filename,
+        openListStore.config.desktopScheme,
+        subUrls,
+        {
+          androidPackage: openListStore.config.androidPackage,
+          iosScheme: openListStore.config.iosScheme,
+        }
+      )
     } else {
       openInBrowser(res.url, targetFile?.size, currentPb.filename)
     }

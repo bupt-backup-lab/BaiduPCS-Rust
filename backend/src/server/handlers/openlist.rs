@@ -26,6 +26,10 @@ pub struct OpenListConfigResponse {
     pub has_password: bool,
     #[serde(rename = "desktopScheme")]
     pub desktop_scheme: String,
+    #[serde(rename = "androidPackage")]
+    pub android_package: String,
+    #[serde(rename = "iosScheme")]
+    pub ios_scheme: String,
     #[serde(rename = "autoMountByUsername")]
     pub auto_mount_by_username: bool,
     #[serde(rename = "fallbackMount")]
@@ -49,6 +53,10 @@ pub struct OpenListConfigUpdateRequest {
     pub password: Option<String>,
     #[serde(default = "default_desktop_scheme", alias = "desktopScheme")]
     pub desktop_scheme: String,
+    #[serde(default, alias = "androidPackage")]
+    pub android_package: Option<String>,
+    #[serde(default, alias = "iosScheme")]
+    pub ios_scheme: Option<String>,
     #[serde(default = "default_true", alias = "autoMountByUsername")]
     pub auto_mount_by_username: bool,
     #[serde(default, alias = "fallbackMount")]
@@ -82,6 +90,8 @@ pub async fn get_openlist_config(
         password: String::new(), // 脱敏为空字符串
         has_password,
         desktop_scheme: cfg.desktop_scheme,
+        android_package: cfg.android_package,
+        ios_scheme: cfg.ios_scheme,
         auto_mount_by_username: cfg.auto_mount_by_username,
         fallback_mount: cfg.fallback_mount,
         takeover_mode: cfg.takeover_mode,
@@ -124,6 +134,14 @@ pub async fn update_openlist_config(
         } else {
             req.desktop_scheme.trim().to_string()
         },
+        android_package: req
+            .android_package
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| guard.openlist.android_package.clone()),
+        ios_scheme: req
+            .ios_scheme
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| guard.openlist.ios_scheme.clone()),
         auto_mount_by_username: req.auto_mount_by_username,
         fallback_mount: req.fallback_mount.trim().to_string(),
         takeover_mode,
@@ -146,6 +164,8 @@ pub async fn update_openlist_config(
         password: String::new(),
         has_password,
         desktop_scheme: new_openlist.desktop_scheme,
+        android_package: new_openlist.android_package,
+        ios_scheme: new_openlist.ios_scheme,
         auto_mount_by_username: new_openlist.auto_mount_by_username,
         fallback_mount: new_openlist.fallback_mount,
         takeover_mode: new_openlist.takeover_mode,

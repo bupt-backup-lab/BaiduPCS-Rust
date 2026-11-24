@@ -13,6 +13,8 @@ const DEFAULT_CONFIG: OpenListConfig = {
   password: '',
   hasPassword: false,
   desktopScheme: 'mpvpcs',
+  androidPackage: '',
+  iosScheme: '',
   autoMountByUsername: true,
   fallbackMount: '',
   takeoverMode: 'observe',

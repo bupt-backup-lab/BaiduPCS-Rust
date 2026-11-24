@@ -1232,7 +1232,17 @@ function handleCtxMpv() {
   closeContextMenu()
   const { directUrl } = getOpenListItemUrls(side, item)
   const subUrls = getOpenListSubUrls(side, item.name)
-  launchMpv(directUrl, item.size, item.name, openListStore.config.desktopScheme, subUrls)
+  launchMpv(
+    directUrl,
+    item.size,
+    item.name,
+    openListStore.config.desktopScheme,
+    subUrls,
+    {
+      androidPackage: openListStore.config.androidPackage,
+      iosScheme: openListStore.config.iosScheme,
+    }
+  )
   if (isVideoFile(item.name)) {
     activeEpisodePlayback.value = {
       side,
@@ -1304,7 +1314,17 @@ function handleEpisodeSwitch(dir: -1 | 1) {
 
     if (currentPb.playMode === 'mpv') {
       const subUrls = getOpenListSubUrls(side, neighbor.name, allNames, currentPb.dir)
-      launchMpv(directUrl, targetItem?.size, label, openListStore.config.desktopScheme, subUrls)
+      launchMpv(
+        directUrl,
+        targetItem?.size,
+        label,
+        openListStore.config.desktopScheme,
+        subUrls,
+        {
+          androidPackage: openListStore.config.androidPackage,
+          iosScheme: openListStore.config.iosScheme,
+        }
+      )
     } else {
       openInBrowser(directUrl, targetItem?.size, label)
     }
@@ -1339,7 +1359,17 @@ function handleEpisodeReLaunch() {
         ? panes[side].items.map((f) => f.name)
         : currentPb.cachedFilenames
     const subUrls = getOpenListSubUrls(side, currentPb.filename, allNames, currentPb.dir)
-    launchMpv(directUrl, targetItem?.size, label, openListStore.config.desktopScheme, subUrls)
+    launchMpv(
+      directUrl,
+      targetItem?.size,
+      label,
+      openListStore.config.desktopScheme,
+      subUrls,
+      {
+        androidPackage: openListStore.config.androidPackage,
+        iosScheme: openListStore.config.iosScheme,
+      }
+    )
   } else {
     openInBrowser(directUrl, targetItem?.size, label)
   }

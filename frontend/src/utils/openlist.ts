@@ -247,14 +247,15 @@ export function openInBrowser(url: string, size?: number, name?: string): void {
 }
 
 /**
- * 唤起 MPV 播放器 (支持自动挂载同名外挂字幕，兼容 Android 与桌面端)
+ * 唤起播放器 (支持自动挂载同名外挂字幕，兼容 Android 应用选择器/指定包名、iOS URL Scheme 与桌面端)
  */
 export function launchMpv(
   url: string,
   size?: number,
   title?: string,
   desktopScheme = 'mpvpcs',
-  subUrls?: string[]
+  subUrls?: string[],
+  mobileConfig?: { androidPackage?: string; iosScheme?: string }
 ): void {
   const sz = size ? `（${formatFileSize(size)}）` : ''
   const head = title ? `${title}\n` : ''
@@ -262,27 +263,53 @@ export function launchMpv(
   const ua = navigator.userAgent
 
   if (/Android/i.test(ua)) {
-    // Android 端：尝试通过 mpv-android intent 唤起
-    // 附加 S.subtitles_location 参数以便 mpv-android (以及 VLC / MX Player 等) 自动加载字幕
+    // Android 端：尝试通过 Intent 唤起移动端播放器
+    // 附加 S.subtitles_location 参数以便 VLC 等主流播放器自动加载字幕
     let extra = ''
     if (subUrls && subUrls.length > 0) {
       extra += `S.subtitles_location=${encodeURIComponent(subUrls[0])};`
     }
+    // 若指定了包名（如 org.videolan.vlc 或 is.xyz.mpv），则定向调起；
+    // 若未指定包名（留空），则不加 package= 参数，由 Android 系统弹出“打开方式”选择列表！
+    const pkg = mobileConfig?.androidPackage?.trim()
+    const pkgPart = pkg ? `package=${encodeURIComponent(pkg)};` : ''
     const intent =
       url.replace(/^https:\/\//i, 'intent://') +
-      `#Intent;scheme=https;action=android.intent.action.VIEW;type=video/*;package=is.xyz.mpv;${extra}end;`
-    ElMessage.info(`${head}正在唤起 MPV Android 播放器${sz}${subTip}...`)
+      `#Intent;scheme=https;action=android.intent.action.VIEW;type=video/*;${pkgPart}${extra}end;`
+    const appLabel = pkg ? `（${pkg}）` : '系统播放器选择列表'
+    ElMessage.info(`${head}正在唤起 ${appLabel}${sz}${subTip}...`)
     window.location.href = intent
     return
   }
 
   if (/iPhone|iPad|iPod/i.test(ua)) {
-    ElMessage.warning('iOS 系统无法直接唤起 MPV，建议点击「复制直链」或「浏览器打开」')
+    // iOS 端：若配置了 iosScheme 则通过对应 URL Scheme 唤起
+    const iosScheme = mobileConfig?.iosScheme?.trim()
+    if (iosScheme) {
+      let schemeUrl = ''
+      if (iosScheme.toLowerCase() === 'infuse') {
+        const subPart = subUrls && subUrls.length > 0 ? `&sub=${encodeURIComponent(subUrls[0])}` : ''
+        schemeUrl = `infuse://x-callback-url/play?url=${encodeURIComponent(url)}${subPart}`
+      } else if (iosScheme.toLowerCase() === 'vlc') {
+        const subPart = subUrls && subUrls.length > 0 ? `&sub=${encodeURIComponent(subUrls[0])}` : ''
+        schemeUrl = `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(url)}${subPart}`
+      } else if (iosScheme.includes('://')) {
+        schemeUrl = `${iosScheme}${url}`
+      } else {
+        schemeUrl = `${iosScheme}://${url.replace(/^https?:\/\//i, '')}`
+      }
+      ElMessage.info(`${head}正在通过 ${iosScheme} 唤起 iOS 播放器${sz}${subTip}...`)
+      window.location.href = schemeUrl
+      return
+    }
+
+    ElMessage.info('未配置 iOS 播放器 Scheme，正在使用浏览器播放...')
+    openInBrowser(url, size, title)
     return
   }
 
   // 桌面端（Windows / macOS / Linux）：使用自定义协议唤起
-  // 若存在同名字幕，将字幕直链作为 ?sub=... 参数追加到链接后，由本地 handler.ps1 转换为 --sub-file 参数注入 MPV
+  // 若存在同名字幕，将字幕直链作为 ?sub=... 参数追加到链接后，由本地 handler.ps1 转换为 --sub-file 参数注入播放器
   let finalUrl = url
   if (subUrls && subUrls.length > 0) {
     const subParams = subUrls.map((s) => `sub=${encodeURIComponent(s)}`).join('&')
@@ -290,7 +317,7 @@ export function launchMpv(
   }
 
   const schemeUrl = finalUrl.replace(/^https?:\/\//i, `${desktopScheme}://`)
-  ElMessage.info(`${head}正在唤起本地 MPV 播放器${sz}${subTip}...`)
+  ElMessage.info(`${head}正在唤起本地播放器${sz}${subTip}...`)
   window.location.href = schemeUrl
 }
 
