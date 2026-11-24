@@ -111,6 +111,16 @@
         </el-button>
         <el-button
             v-if="openListStore.config.enabled"
+            type="primary"
+            plain
+            @click="handleOpenDualPaneModal"
+            title="打开 OpenList 双栏管理面板（含影视重命名与批量精修）"
+        >
+          <el-icon><Grid /></el-icon>
+          双栏管理
+        </el-button>
+        <el-button
+            v-if="openListStore.config.enabled"
             type="info"
             @click="handleOpenListGoto"
             title="在 OpenList 中打开当前目录"
@@ -183,6 +193,15 @@
         </el-button>
         <el-button type="danger" circle @click="showShareDirectDownloadDialog = true" title="分享直下">
           <el-icon><Download /></el-icon>
+        </el-button>
+        <el-button
+            v-if="openListStore.config.enabled"
+            type="primary"
+            circle
+            @click="handleOpenDualPaneModal"
+            title="双栏管理（含影视重命名）"
+        >
+          <el-icon><Grid /></el-icon>
         </el-button>
         <el-button
             v-if="openListStore.config.enabled"
@@ -621,6 +640,13 @@
       @copy="handleEpisodeCopy"
       @re-launch="handleEpisodeReLaunch"
     />
+
+    <!-- OpenList 双栏管理面板（含影视重命名与批量精修） -->
+    <OpenListDualPaneModal
+      v-model="showDualPaneModal"
+      :initial-path="dualPaneInitialPath"
+      @close="refreshFileList"
+    />
   </div>
 </template>
 
@@ -630,6 +656,7 @@ import {useRoute, useRouter} from 'vue-router'
 import {ElMessage, ElMessageBox} from 'element-plus'
 import type {InputInstance, TableInstance} from 'element-plus'
 import EpisodePlayerBar from '@/components/EpisodePlayerBar.vue'
+import OpenListDualPaneModal from '@/components/OpenListDualPaneModal.vue'
 import {
   getFileList,
   searchFiles,
@@ -689,6 +716,9 @@ import {
   findNeighborEpisode,
   formatEpisodeLabel,
   refreshOpenListDir,
+  resolveAccountMount,
+  splitPath,
+  getRelativeParts,
 } from '@/utils/openlist'
 import {useIsMobile} from '@/utils/responsive'
 import {createDownload, createFolderDownload, createBatchDownload, type BatchDownloadItem, type DownloadConflictStrategy} from '@/api/download'
@@ -2561,6 +2591,26 @@ async function handleOpenListRefresh() {
   }
 }
 
+const showDualPaneModal = ref(false)
+const dualPaneInitialPath = ref('/')
+
+function handleOpenDualPaneModal() {
+  const activeUser = authStore.activeAccount || authStore.user
+  const resolved = resolveAccountMount(activeUser, openListStore.config)
+  if (!resolved.error) {
+    const fullParts = splitPath(currentDir.value)
+    const rel = getRelativeParts(resolved, fullParts)
+    if (rel) {
+      dualPaneInitialPath.value = '/' + [...resolved.mountParts, ...rel].join('/')
+    } else {
+      dualPaneInitialPath.value = '/' + resolved.mountParts.join('/')
+    }
+  } else {
+    dualPaneInitialPath.value = '/'
+  }
+  showDualPaneModal.value = true
+}
+
 // 防止 import 被 tree-shake 误判 unused（basename / joinPath 在模板中未直接使用）
 void basename
 void joinPath
@@ -2568,7 +2618,7 @@ void joinPath
 
 <script lang="ts">
 // 图标导入
-export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Download, Share, Loading, Link, Delete, Search, Close, CopyDocument, Rank, Switch, Edit, MoreFilled, Operation, TopRight, RefreshRight} from '@element-plus/icons-vue'
+export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Download, Share, Loading, Link, Delete, Search, Close, CopyDocument, Rank, Switch, Edit, MoreFilled, Operation, TopRight, RefreshRight, Grid} from '@element-plus/icons-vue'
 </script>
 
 <style scoped lang="scss">

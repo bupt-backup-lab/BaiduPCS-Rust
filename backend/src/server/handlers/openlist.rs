@@ -899,3 +899,108 @@ pub async fn execute_openlist_op(
         _ => Err(ApiError::BadRequest(format!("不支持的操作类型: {}", req.op))),
     }
 }
+
+/// POST /openlist/fs/call
+/// 由后端代理向 OpenList 发起原始文件系统操作（/api/fs/*）
+#[derive(Debug, Deserialize)]
+pub struct OpenListFsCallRequest {
+    /// 接口相对 URI，必须以 "/api/fs/" 或 "/api/public/" 开头，如 "/api/fs/list", "/api/fs/mkdir", "/api/fs/batch_rename" 等
+    pub uri: String,
+    /// 请求参数 JSON
+    #[serde(default)]
+    pub body: serde_json::Value,
+    /// 操作完成后需要强制刷新的目录路径（可选）
+    #[serde(default)]
+    pub refresh_path: Option<String>,
+}
+
+pub async fn openlist_fs_call(
+    State(app_state): State<AppState>,
+    Json(req): Json<OpenListFsCallRequest>,
+) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
+    let cfg = app_state.config.read().await.openlist.clone();
+
+    if !cfg.enabled {
+        return Err(ApiError::BadRequest("未启用 OpenList 联动".to_string()));
+    }
+    if cfg.base_url.is_empty() {
+        return Err(ApiError::BadRequest("未配置 OpenList 服务网址".to_string()));
+    }
+    if cfg.username.is_empty() || cfg.password.is_empty() {
+        return Err(ApiError::BadRequest(
+            "未配置 OpenList 账号密码".to_string(),
+        ));
+    }
+
+    if !req.uri.starts_with("/api/fs/") && !req.uri.starts_with("/api/public/") {
+        return Err(ApiError::BadRequest("仅支持调用 /api/fs/* 接口".to_string()));
+    }
+
+    let base_url = cfg.base_url.trim().trim_end_matches('/').to_string();
+    let client = make_http_client();
+    let mut token = login_and_get_token(&client, &base_url, &cfg.username, &cfg.password).await?;
+
+    let res = call_openlist_api(
+        &client,
+        &base_url,
+        &req.uri,
+        &mut token,
+        &cfg.username,
+        &cfg.password,
+        &req.body,
+        req.refresh_path.as_deref(),
+    )
+    .await?;
+
+    Ok(Json(ApiResponse::success(res)))
+}
+
+/// POST /openlist/tmdb/proxy
+/// 代理请求 TMDB API 检索影视元数据（规避浏览器 CORS 跨域及网络环境限制）
+#[derive(Debug, Deserialize)]
+pub struct TmdbProxyRequest {
+    pub url: String,
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+pub async fn openlist_tmdb_proxy(
+    State(_): State<AppState>,
+    Json(req): Json<TmdbProxyRequest>,
+) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
+    if !req.url.starts_with("https://api.themoviedb.org/") {
+        return Err(ApiError::BadRequest("仅允许代理 api.themoviedb.org 请求".to_string()));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("创建 HTTP 客户端失败: {}", e)))?;
+
+    let mut request = client.get(&req.url);
+    if let Some(token) = req.token {
+        if !token.is_empty() {
+            if token.len() > 50 {
+                request = request.header("Authorization", format!("Bearer {}", token));
+            } else if !req.url.contains("api_key=") {
+                let sep = if req.url.contains('?') { '&' } else { '?' };
+                let full_url = format!("{}{}{}api_key={}", req.url, sep, "", token);
+                request = client.get(&full_url);
+            }
+        }
+    }
+    request = request.header("Accept", "application/json");
+
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("请求 TMDB 失败: {}", e)))?;
+
+    let status = resp.status();
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("解析 TMDB 响应失败 (HTTP {}): {}", status, e)))?;
+
+    Ok(Json(ApiResponse::success(json)))
+}

@@ -653,4 +653,32 @@ export async function executeOpenListOpBackend<T = any>(
   return apiClient.post('/openlist/execute', req, { timeout: 45000 })
 }
 
+/**
+ * 后端代理调用 OpenList 原始 /api/fs/* 接口（双栏管理与批量操作专用）
+ */
+export async function callOpenListFsBackend<T = any>(
+  uri: string,
+  body: Record<string, any> = {},
+  refresh_path?: string
+): Promise<T> {
+  return apiClient.post('/openlist/fs/call', {
+    uri,
+    body,
+    refresh_path,
+  }, { timeout: 45000 })
+}
+
+/**
+ * 后端代理请求 TMDB API 检索元数据（规避浏览器 CORS 跨域限制）
+ */
+export async function proxyTmdbBackend<T = any>(
+  url: string,
+  token?: string
+): Promise<T> {
+  return apiClient.post('/openlist/tmdb/proxy', {
+    url,
+    token,
+  }, { timeout: 20000 })
+}
+
 
