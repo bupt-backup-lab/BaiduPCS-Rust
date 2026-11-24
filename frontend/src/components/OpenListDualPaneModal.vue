@@ -273,13 +273,15 @@
             <button class="omni-ctx-close" @click="closeContextMenu">✕</button>
           </div>
           <div class="omni-ctx-items">
+            <div class="omni-menu-item" @click="handleCtxCopy">📄 复制到对侧</div>
+            <div class="omni-menu-item" @click="handleCtxMove">✈️ 移动到对侧</div>
+            <div class="omni-menu-item" @click="handleCtxSingleRename">✏️ 重命名</div>
+            <div class="omni-menu-item" @click="handleCtxTmdbScrape">🎬 TMDB 智能刮削</div>
+            <div class="omni-menu-divider"></div>
             <div v-if="!ctxMenu.item?.is_dir" class="omni-menu-item" @click="handleCtxMpv">▶️ MPV 播放</div>
             <div class="omni-menu-item" @click="handleCtxOpenInBrowser">🌐 浏览器打开</div>
             <div class="omni-menu-item" @click="handleCtxCopyUrl">🔗 复制 OpenList 链接</div>
-            <div class="omni-menu-item" @click="handleCtxSingleRename">✏️ 重命名</div>
-            <div class="omni-menu-item" @click="handleCtxTmdbScrape">🎬 TMDB 智能刮削</div>
-            <div class="omni-menu-item" @click="handleCtxCopy">📄 复制到对侧</div>
-            <div class="omni-menu-item" @click="handleCtxMove">✈️ 移动到对侧</div>
+            <div class="omni-menu-divider"></div>
             <div class="omni-menu-item danger" @click="handleCtxDelete">🗑️ 删除</div>
           </div>
         </div>
@@ -2529,9 +2531,17 @@ onMounted(() => {
   background: #f0f5ff;
   color: #1890ff;
 }
+.omni-menu-item.danger {
+  color: #ef4444;
+}
 .omni-menu-item.danger:hover {
   background: #fef2f2;
-  color: #ef4444;
+  color: #dc2626;
+}
+.omni-menu-divider {
+  height: 1px;
+  background: #e2e8f0;
+  margin: 4px 0;
 }
 
 /* 子模态窗 */
