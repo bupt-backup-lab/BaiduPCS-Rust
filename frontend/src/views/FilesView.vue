@@ -111,16 +111,6 @@
         </el-button>
         <el-button
             v-if="openListStore.config.enabled"
-            type="primary"
-            plain
-            @click="handleOpenDualPaneModal"
-            title="打开 OpenList 双栏管理面板（含影视重命名与批量精修）"
-        >
-          <el-icon><Grid /></el-icon>
-          双栏管理
-        </el-button>
-        <el-button
-            v-if="openListStore.config.enabled"
             type="info"
             @click="handleOpenListGoto"
             title="在 OpenList 中打开当前目录"
@@ -141,6 +131,16 @@
         <el-button type="primary" @click="refreshFileList">
           <el-icon><Refresh /></el-icon>
           刷新
+        </el-button>
+        <el-button
+            v-if="openListStore.config.enabled"
+            type="primary"
+            plain
+            @click="handleOpenDualPaneModal"
+            title="打开 OpenList 双栏管理面板（含影视重命名与批量精修）"
+        >
+          <el-icon><Grid /></el-icon>
+          双栏管理
         </el-button>
       </div>
 
@@ -196,15 +196,6 @@
         </el-button>
         <el-button
             v-if="openListStore.config.enabled"
-            type="primary"
-            circle
-            @click="handleOpenDualPaneModal"
-            title="双栏管理（含影视重命名）"
-        >
-          <el-icon><Grid /></el-icon>
-        </el-button>
-        <el-button
-            v-if="openListStore.config.enabled"
             type="info"
             circle
             @click="handleOpenListGoto"
@@ -224,6 +215,15 @@
         </el-button>
         <el-button type="primary" circle @click="refreshFileList">
           <el-icon><Refresh /></el-icon>
+        </el-button>
+        <el-button
+            v-if="openListStore.config.enabled"
+            type="primary"
+            circle
+            @click="handleOpenDualPaneModal"
+            title="双栏管理（含影视重命名）"
+        >
+          <el-icon><Grid /></el-icon>
         </el-button>
       </div>
     </div>
