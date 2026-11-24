@@ -35,7 +35,7 @@
               <div class="omni-tools">
                 <button class="tool-btn" @click="renderPane('left', true)">🔄 刷新</button>
                 <button class="tool-btn" @click="handleMkdir('left')">➕ 新建文件夹</button>
-                <button class="tool-btn" @click="syncPath('left', 'right')">📍 同步右侧</button>
+                <button class="tool-btn" @click="syncPath('left', 'right')">📍 同步给右侧</button>
               </div>
             </div>
 
@@ -136,7 +136,7 @@
               <div class="omni-tools">
                 <button class="tool-btn" @click="renderPane('right', true)">🔄 刷新</button>
                 <button class="tool-btn" @click="handleMkdir('right')">➕ 新建文件夹</button>
-                <button class="tool-btn" @click="syncPath('right', 'left')">📍 同步左侧</button>
+                <button class="tool-btn" @click="syncPath('right', 'left')">📍 同步给左侧</button>
               </div>
             </div>
 
@@ -273,17 +273,20 @@
             <button class="omni-ctx-close" @click="closeContextMenu">✕</button>
           </div>
           <div class="omni-ctx-items">
+            <div v-if="!ctxMenu.item?.is_dir" class="omni-menu-item" @click="handleCtxMpv">▶️ MPV 播放</div>
+            <div class="omni-menu-item" @click="handleCtxOpenInBrowser">🌐 浏览器打开</div>
+            <div class="omni-menu-item" @click="handleCtxCopyUrl">🔗 复制 OpenList 链接</div>
             <div class="omni-menu-item" @click="handleCtxSingleRename">✏️ 重命名</div>
             <div class="omni-menu-item" @click="handleCtxTmdbScrape">🎬 TMDB 智能刮削</div>
-            <div class="omni-menu-item" @click="handleCtxCopy">📄 复制</div>
-            <div class="omni-menu-item" @click="handleCtxMove">✈️ 移动</div>
+            <div class="omni-menu-item" @click="handleCtxCopy">📄 复制到对侧</div>
+            <div class="omni-menu-item" @click="handleCtxMove">✈️ 移动到对侧</div>
             <div class="omni-menu-item danger" @click="handleCtxDelete">🗑️ 删除</div>
           </div>
         </div>
 
         <!-- 模态框 1：单文件重命名 -->
         <div v-if="singleRename.visible" class="sub-modal-mask" @click.self="singleRename.visible = false">
-          <div class="sub-modal-box" style="width: 400px;">
+          <div class="sub-modal-box single-modal-box">
             <h3 style="margin: 0 0 15px 0; font-size: 16px; color: #1e293b;">✏️ 重命名该项目</h3>
             <input
               ref="singleRenameInputRef"
@@ -304,7 +307,7 @@
 
         <!-- 模态框 2：批量重命名 (正则 / 顺序 / 查找替换) -->
         <div v-if="batchRename.visible" class="sub-modal-mask" @click.self="batchRename.visible = false">
-          <div class="sub-modal-box" style="width: 650px;">
+          <div class="sub-modal-box batch-modal-box">
             <div class="rn-header">
               <span>批量重命名</span>
               <span class="rn-close-x" @click="batchRename.visible = false">✕</span>
@@ -388,7 +391,7 @@
 
         <!-- 模态框 3：🎬 智能影视重命名面板 (带拖拽排序、单行铅笔精修、字幕后缀保留) -->
         <div v-if="movieRename.visible" class="sub-modal-mask">
-          <div class="sub-modal-box" style="width: 860px; max-height: 90vh;">
+          <div class="sub-modal-box movie-modal-box modal-box-flush">
             <div style="padding: 15px 20px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center;">
               <div>
                 <h3 style="margin: 0; font-size: 16px; color: #1e293b; display: flex; align-items: center; gap: 8px;">
@@ -564,7 +567,7 @@
 
         <!-- 模态框 4：🎬 TMDB 智能刮削面板 (含豆瓣、IMDb、TMDB 直达与 4 大格式) -->
         <div v-if="tmdbModal.visible" class="sub-modal-mask" @click.self="tmdbModal.visible = false">
-          <div class="sub-modal-box" style="width: 780px; max-height: 88vh;">
+          <div class="sub-modal-box tmdb-modal-box modal-box-flush">
             <div class="tmdb-ext-header">
               <div>
                 <h3 style="margin: 0; font-size: 16px; color: #1e293b;">🎬 TMDB 智能刮削</h3>
@@ -624,18 +627,20 @@
                     :key="card.id"
                     class="tmdb-ext-result-card"
                   >
-                    <img
-                      :src="card.poster_path ? `https://image.tmdb.org/t/p/w200${card.poster_path}` : 'https://via.placeholder.com/60x90'"
-                      class="tmdb-ext-poster"
-                    />
-                    <div class="tmdb-ext-info">
-                      <h4 class="tmdb-ext-title">{{ card.displayTitle }}</h4>
-                      <p class="tmdb-ext-meta">
-                        {{ card.media_type === 'movie' ? '🎬 电影' : '📺 剧集' }} • {{ card.displayYear || '未知年份' }} • TMDB: {{ card.id }}
-                        <template v-if="card.imdb_id"> • IMDb: {{ card.imdb_id }}</template>
-                      </p>
-                      <div class="tmdb-ext-preview-row">
-                        ✨ 目标: <span class="tmdb-ext-preview-text">{{ getTmdbTargetName(card) }}</span>
+                    <div class="tmdb-ext-card-content">
+                      <img
+                        :src="card.poster_path ? `https://image.tmdb.org/t/p/w200${card.poster_path}` : 'https://via.placeholder.com/60x90'"
+                        class="tmdb-ext-poster"
+                      />
+                      <div class="tmdb-ext-info">
+                        <h4 class="tmdb-ext-title">{{ card.displayTitle }}</h4>
+                        <p class="tmdb-ext-meta">
+                          {{ card.media_type === 'movie' ? '🎬 电影' : '📺 剧集' }} • {{ card.displayYear || '未知年份' }} • TMDB: {{ card.id }}
+                          <template v-if="card.imdb_id"> • IMDb: {{ card.imdb_id }}</template>
+                        </p>
+                        <div class="tmdb-ext-preview-row">
+                          ✨ 目标: <span class="tmdb-ext-preview-text">{{ getTmdbTargetName(card) }}</span>
+                        </div>
                       </div>
                     </div>
 
@@ -658,7 +663,7 @@
 
         <!-- 模态框 5：删除二次确认 (双栏内嵌模态框，还原 OpenList 原生风格) -->
         <div v-if="deleteModal.visible" class="sub-modal-mask" @click.self="deleteModal.visible = false">
-          <div class="sub-modal-box" style="width: 420px;">
+          <div class="sub-modal-box delete-modal-box">
             <div class="rn-header" style="margin-bottom: 14px;">
               <span style="display: flex; align-items: center; gap: 6px; font-weight: bold; color: #1e293b;">
                 🗑️ 确认删除
@@ -687,6 +692,48 @@
             </div>
           </div>
         </div>
+
+        <!-- 模态框 6：新建文件夹 (双栏内嵌模态框) -->
+        <div v-if="mkdirModal.visible" class="sub-modal-mask" @click.self="mkdirModal.visible = false">
+          <div class="sub-modal-box mkdir-modal-box">
+            <div class="rn-header" style="margin-bottom: 14px;">
+              <span style="display: flex; align-items: center; gap: 6px; font-weight: bold; color: #1e293b;">
+                ➕ 新建文件夹
+              </span>
+              <span class="rn-close-x" @click="mkdirModal.visible = false">✕</span>
+            </div>
+            <div style="font-size: 13px; color: #64748b; margin-bottom: 10px;">
+              在 <b>{{ panes[mkdirModal.side].path }}</b> 下新建文件夹：
+            </div>
+            <input
+              ref="mkdirInputRef"
+              v-model="mkdirModal.name"
+              type="text"
+              placeholder="请输入文件夹名称"
+              class="rn-input"
+              @keydown.enter="submitMkdir"
+              @keydown.esc="mkdirModal.visible = false"
+            />
+            <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 15px;">
+              <button class="omni-btn btn-cancel" @click="mkdirModal.visible = false">取消</button>
+              <button class="omni-btn btn-primary" :disabled="mkdirModal.submitting" @click="submitMkdir">
+                {{ mkdirModal.submitting ? '创建中...' : '确定' }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 剧集连播悬浮控制栏 -->
+        <EpisodePlayerBar
+          :visible="!!activeEpisodePlayback"
+          :filename="activeEpisodePlayback?.filename || ''"
+          :all-filenames="activeEpisodePlayback ? (panes[activeEpisodePlayback.side].path === activeEpisodePlayback.dir ? panes[activeEpisodePlayback.side].files.map(f => f.name) : activeEpisodePlayback.cachedFilenames) : []"
+          :play-mode="activeEpisodePlayback?.playMode || 'mpv'"
+          @close="activeEpisodePlayback = null"
+          @switch="handleEpisodeSwitch"
+          @copy="handleEpisodeCopy"
+          @re-launch="handleEpisodeReLaunch"
+        />
       </div>
     </div>
   </teleport>
@@ -694,8 +741,30 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, nextTick } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { callOpenListFsBackend, proxyTmdbBackend } from '@/api/config'
+import EpisodePlayerBar from '@/components/EpisodePlayerBar.vue'
+import { useOpenListStore } from '@/stores/openlist'
+import {
+  launchMpv,
+  openInBrowser,
+  copyDirectUrl,
+  isVideoFile,
+  findNeighborEpisode,
+  formatEpisodeLabel,
+  splitPath,
+} from '@/utils/openlist'
+
+const openListStore = useOpenListStore()
+
+// 剧集连播悬浮栏播放状态
+const activeEpisodePlayback = ref<{
+  side: 'left' | 'right'
+  dir: string
+  filename: string
+  playMode: 'mpv' | 'browser'
+  cachedFilenames: string[]
+} | null>(null)
 
 // ==========================================
 // ⚙️ 用户预设与默认配置 (1:1 还原 aa.js)
@@ -1062,31 +1131,50 @@ function toggleExtSelect(side: 'left' | 'right', ext: string) {
 }
 
 // ==========================================
-// ➕ 新建文件夹
+// ➕ 新建文件夹 (内嵌模态框)
 // ==========================================
-async function handleMkdir(side: 'left' | 'right') {
-  try {
-    const { value: name } = await ElMessageBox.prompt('请输入文件夹名称:', '新建文件夹', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      inputPattern: /\S+/,
-      inputErrorMessage: '文件夹名称不能为空',
-    })
-    if (!name || !name.trim()) return
+const mkdirModal = reactive({
+  visible: false,
+  side: 'left' as 'left' | 'right',
+  name: '',
+  submitting: false,
+})
+const mkdirInputRef = ref<HTMLInputElement | null>(null)
 
-    const newPath = panes[side].path === '/' ? `/${name.trim()}` : `${panes[side].path}/${name.trim()}`
-    await callOpenListFsBackend('/api/fs/mkdir', { path: newPath }, panes[side].path)
+function handleMkdir(side: 'left' | 'right') {
+  mkdirModal.side = side
+  mkdirModal.name = ''
+  mkdirModal.submitting = false
+  mkdirModal.visible = true
+  nextTick(() => {
+    mkdirInputRef.value?.focus()
+  })
+}
+
+async function submitMkdir() {
+  const name = mkdirModal.name.trim()
+  if (!name) {
+    ElMessage.warning('文件夹名称不能为空')
+    return
+  }
+  mkdirModal.submitting = true
+  const side = mkdirModal.side
+  try {
+    const parent = panes[side].path
+    const newPath = parent === '/' ? `/${name}` : `${parent}/${name}`
+    await callOpenListFsBackend('/api/fs/mkdir', { path: newPath }, parent)
     ElMessage.success('新建文件夹成功')
+    mkdirModal.visible = false
     renderPane(side, true)
   } catch (err: any) {
-    if (err !== 'cancel') {
-      ElMessage.error(err.message || '新建文件夹失败')
-    }
+    ElMessage.error(err.message || '新建文件夹失败')
+  } finally {
+    mkdirModal.submitting = false
   }
 }
 
 // ==========================================
-// 上下文菜单与单文件操作
+// 上下文菜单与文件操作 / 媒体播放
 // ==========================================
 const ctxMenu = reactive({
   visible: false,
@@ -1098,10 +1186,138 @@ const ctxMenu = reactive({
 
 const ctxMenuStyle = computed(() => {
   if (isMobile.value) return {}
-  const x = Math.min(ctxMenu.x, window.innerWidth - 180)
-  const y = Math.min(ctxMenu.y, window.innerHeight - 200)
-  return { left: `${x}px`, top: `${y}px` }
+  const x = Math.min(ctxMenu.x, window.innerWidth - 220)
+  const y = Math.min(ctxMenu.y, window.innerHeight - 380)
+  return { left: `${Math.max(10, x)}px`, top: `${Math.max(10, y)}px` }
 })
+
+function getOpenListItemUrls(side: 'left' | 'right', item: OpenListItem) {
+  const base = (openListStore.config.baseUrl || '').replace(/\/+$/, '')
+  const parent = panes[side].path
+  const fullPath = parent === '/' ? `/${item.name}` : `${parent}/${item.name}`
+  const encodedParts = splitPath(fullPath).map(encodeURIComponent).join('/')
+  const directUrl = `${base}/d/${encodedParts}`
+  const browseUrl = `${base}/${encodedParts}`
+  return {
+    directUrl,
+    browseUrl,
+    fullPath,
+    parent,
+  }
+}
+
+function handleCtxMpv() {
+  if (!ctxMenu.item) return
+  const item = ctxMenu.item
+  const side = ctxMenu.side
+  closeContextMenu()
+  const { directUrl } = getOpenListItemUrls(side, item)
+  launchMpv(directUrl, item.size, item.name, openListStore.config.desktopScheme)
+  if (isVideoFile(item.name)) {
+    activeEpisodePlayback.value = {
+      side,
+      dir: panes[side].path,
+      filename: item.name,
+      playMode: 'mpv',
+      cachedFilenames: panes[side].items.map((f) => f.name),
+    }
+  }
+}
+
+function handleCtxOpenInBrowser() {
+  if (!ctxMenu.item) return
+  const item = ctxMenu.item
+  const side = ctxMenu.side
+  closeContextMenu()
+  const { directUrl, browseUrl } = getOpenListItemUrls(side, item)
+  if (item.is_dir) {
+    window.open(browseUrl, '_blank')
+  } else {
+    openInBrowser(directUrl, item.size, item.name)
+    if (isVideoFile(item.name)) {
+      activeEpisodePlayback.value = {
+        side,
+        dir: panes[side].path,
+        filename: item.name,
+        playMode: 'browser',
+        cachedFilenames: panes[side].items.map((f) => f.name),
+      }
+    }
+  }
+}
+
+function handleCtxCopyUrl() {
+  if (!ctxMenu.item) return
+  const item = ctxMenu.item
+  const side = ctxMenu.side
+  closeContextMenu()
+  const { directUrl, browseUrl } = getOpenListItemUrls(side, item)
+  if (item.is_dir) {
+    void copyDirectUrl(browseUrl, 'OpenList 文件夹链接已复制')
+  } else {
+    void copyDirectUrl(directUrl, 'OpenList 直链已复制')
+  }
+}
+
+function handleEpisodeSwitch(dir: -1 | 1) {
+  if (!activeEpisodePlayback.value) return
+  const currentPb = activeEpisodePlayback.value
+  const side = currentPb.side
+  const allNames =
+    panes[side].path === currentPb.dir
+      ? panes[side].items.map((f) => f.name)
+      : currentPb.cachedFilenames
+
+  const neighbor = findNeighborEpisode(allNames, currentPb.filename, dir)
+  if (neighbor.error) {
+    ElMessage.warning(neighbor.error)
+    return
+  }
+
+  if (neighbor.name) {
+    const targetItem = panes[side].items.find((f) => f.name === neighbor.name)
+    const base = (openListStore.config.baseUrl || '').replace(/\/+$/, '')
+    const fullPath = currentPb.dir === '/' ? `/${neighbor.name}` : `${currentPb.dir}/${neighbor.name}`
+    const encoded = splitPath(fullPath).map(encodeURIComponent).join('/')
+    const directUrl = `${base}/d/${encoded}`
+    const label = (neighbor.key ? formatEpisodeLabel(neighbor.key) + '：' : '') + neighbor.name
+
+    if (currentPb.playMode === 'mpv') {
+      launchMpv(directUrl, targetItem?.size, label, openListStore.config.desktopScheme)
+    } else {
+      openInBrowser(directUrl, targetItem?.size, label)
+    }
+    activeEpisodePlayback.value.filename = neighbor.name
+    ElMessage.success(`已切换至${dir > 0 ? '下一集' : '上一集'}：${label}`)
+  }
+}
+
+function handleEpisodeCopy() {
+  if (!activeEpisodePlayback.value) return
+  const currentPb = activeEpisodePlayback.value
+  const base = (openListStore.config.baseUrl || '').replace(/\/+$/, '')
+  const fullPath = currentPb.dir === '/' ? `/${currentPb.filename}` : `${currentPb.dir}/${currentPb.filename}`
+  const encoded = splitPath(fullPath).map(encodeURIComponent).join('/')
+  void copyDirectUrl(`${base}/d/${encoded}`)
+}
+
+function handleEpisodeReLaunch() {
+  if (!activeEpisodePlayback.value) return
+  const currentPb = activeEpisodePlayback.value
+  const side = currentPb.side
+  const targetItem = panes[side].items.find((f) => f.name === currentPb.filename)
+  const base = (openListStore.config.baseUrl || '').replace(/\/+$/, '')
+  const fullPath = currentPb.dir === '/' ? `/${currentPb.filename}` : `${currentPb.dir}/${currentPb.filename}`
+  const encoded = splitPath(fullPath).map(encodeURIComponent).join('/')
+  const directUrl = `${base}/d/${encoded}`
+  const label = currentPb.filename
+
+  if (currentPb.playMode === 'mpv') {
+    launchMpv(directUrl, targetItem?.size, label, openListStore.config.desktopScheme)
+  } else {
+    openInBrowser(directUrl, targetItem?.size, label)
+  }
+}
 
 function openContextMenu(side: 'left' | 'right', item: OpenListItem, e: MouseEvent) {
   ctxMenu.visible = true
@@ -2335,6 +2551,13 @@ onMounted(() => {
   padding: 20px;
   box-sizing: border-box;
 }
+.single-modal-box { width: 400px; }
+.batch-modal-box { width: 650px; }
+.movie-modal-box { width: 860px; max-height: 90vh; }
+.tmdb-modal-box { width: 780px; max-height: 88vh; }
+.delete-modal-box { width: 420px; }
+.mkdir-modal-box { width: 400px; }
+.modal-box-flush { padding: 0 !important; }
 
 .rn-header {
   padding-bottom: 12px;
@@ -2643,6 +2866,13 @@ onMounted(() => {
   align-items: center;
   gap: 15px;
 }
+.tmdb-ext-card-content {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  flex: 1;
+  min-width: 0;
+}
 .tmdb-ext-poster {
   width: 70px;
   height: 105px;
@@ -2859,6 +3089,177 @@ onMounted(() => {
     padding: 12px 18px;
     background: #f8fafc;
     border-bottom: 1px solid #e2e8f0;
+  }
+
+  /* 子模态窗全屏/居中适配 */
+  .sub-modal-box,
+  .single-modal-box,
+  .batch-modal-box,
+  .movie-modal-box,
+  .tmdb-modal-box,
+  .delete-modal-box,
+  .mkdir-modal-box {
+    width: 95vw !important;
+    max-width: 95vw !important;
+    max-height: 94vh !important;
+    padding: 12px !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+  }
+  .modal-box-flush {
+    padding: 0 !important;
+  }
+
+  /* 🎬 TMDB 刮削模态框移动端适配 (彻底解决两张截图中的挤压错乱) */
+  .tmdb-ext-header {
+    padding: 10px 14px !important;
+  }
+  .tmdb-ext-body {
+    padding: 10px !important;
+  }
+  .tmdb-ext-search-area {
+    padding: 10px !important;
+    margin-bottom: 10px !important;
+  }
+  .tmdb-ext-search-row {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+    margin-bottom: 8px !important;
+  }
+  .tmdb-ext-input {
+    width: 100% !important;
+    flex: 1 1 100% !important;
+    padding: 8px 12px !important;
+    font-size: 14px !important;
+    box-sizing: border-box !important;
+  }
+  .tmdb-ext-input-year {
+    flex: 1 1 auto !important;
+    width: auto !important;
+    min-width: 80px !important;
+    padding: 8px 10px !important;
+    font-size: 13px !important;
+    box-sizing: border-box !important;
+  }
+  .tmdb-ext-btn {
+    flex: 1 1 auto !important;
+    padding: 8px 16px !important;
+    font-size: 13px !important;
+    white-space: nowrap !important;
+  }
+  .tmdb-ext-format-row {
+    font-size: 12px !important;
+    gap: 8px !important;
+  }
+  .tmdb-ext-results-container {
+    padding: 8px 0 !important;
+  }
+  .tmdb-ext-result-card {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 10px !important;
+    padding: 10px !important;
+  }
+  .tmdb-ext-card-content {
+    display: flex !important;
+    align-items: flex-start !important;
+    gap: 10px !important;
+    width: 100% !important;
+  }
+  .tmdb-ext-poster {
+    width: 60px !important;
+    height: 90px !important;
+    flex-shrink: 0 !important;
+  }
+  .tmdb-ext-info {
+    flex: 1 !important;
+    min-width: 0 !important;
+  }
+  .tmdb-ext-title {
+    font-size: 14px !important;
+    line-height: 1.3 !important;
+  }
+  .tmdb-ext-meta {
+    font-size: 11px !important;
+    margin-bottom: 4px !important;
+  }
+  .tmdb-ext-preview-row {
+    font-size: 11px !important;
+    padding: 4px 6px !important;
+  }
+  .tmdb-ext-actions {
+    width: 100% !important;
+    min-width: 0 !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+  .tmdb-ext-link-group {
+    width: 100% !important;
+    display: flex !important;
+    gap: 6px !important;
+  }
+  .tmdb-ext-link-btn {
+    flex: 1 !important;
+    padding: 6px 4px !important;
+    font-size: 12px !important;
+    text-align: center !important;
+  }
+  .tmdb-ext-apply-btn {
+    width: 100% !important;
+    padding: 8px 12px !important;
+    font-size: 13px !important;
+  }
+
+  /* 智能校验面板移动端适配 */
+  .modal-header-row {
+    display: none !important;
+  }
+  .draggable-row {
+    flex-wrap: wrap !important;
+    padding: 8px 10px !important;
+    gap: 4px !important;
+  }
+  .row-src {
+    flex: 1 1 calc(100% - 65px) !important;
+    padding: 0 !important;
+    font-size: 12px !important;
+    color: #64748b !important;
+  }
+  .row-arrow {
+    display: none !important;
+  }
+  .row-new {
+    flex: 1 1 100% !important;
+    padding: 4px 0 0 28px !important;
+    font-size: 13px !important;
+    color: #0f172a !important;
+  }
+  .modal-mode-wrapper {
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+  }
+
+  /* 过滤栏移动端适配 */
+  .omni-filter-row {
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+  }
+  .omni-filter-input {
+    flex: 1 1 auto !important;
+    width: auto !important;
+    min-width: 0 !important;
+  }
+  .omni-filter-modes {
+    gap: 6px !important;
+    padding: 4px 6px !important;
+    font-size: 11px !important;
+  }
+
+  /* 悬浮控制栏层级提升 */
+  :deep(.episode-player-bar),
+  .episode-player-bar {
+    z-index: 100005 !important;
   }
 }
 </style>
