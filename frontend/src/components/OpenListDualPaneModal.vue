@@ -727,7 +727,7 @@
         <EpisodePlayerBar
           :visible="!!activeEpisodePlayback"
           :filename="activeEpisodePlayback?.filename || ''"
-          :all-filenames="activeEpisodePlayback ? (panes[activeEpisodePlayback.side].path === activeEpisodePlayback.dir ? panes[activeEpisodePlayback.side].files.map(f => f.name) : activeEpisodePlayback.cachedFilenames) : []"
+          :all-filenames="episodeAllFilenames"
           :play-mode="activeEpisodePlayback?.playMode || 'mpv'"
           @close="activeEpisodePlayback = null"
           @switch="handleEpisodeSwitch"
@@ -1318,6 +1318,16 @@ function handleEpisodeReLaunch() {
     openInBrowser(directUrl, targetItem?.size, label)
   }
 }
+
+const episodeAllFilenames = computed<string[]>(() => {
+  if (!activeEpisodePlayback.value) return []
+  const pb = activeEpisodePlayback.value
+  const pane = panes[pb.side]
+  if (pane.path === pb.dir) {
+    return pane.items.map((it: OpenListItem) => it.name)
+  }
+  return pb.cachedFilenames
+})
 
 function openContextMenu(side: 'left' | 'right', item: OpenListItem, e: MouseEvent) {
   ctxMenu.visible = true
