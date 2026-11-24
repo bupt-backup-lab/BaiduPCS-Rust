@@ -277,7 +277,7 @@
             <div class="omni-menu-item" @click="handleCtxTmdbScrape">🎬 TMDB 智能刮削</div>
             <div class="omni-menu-item" @click="handleCtxCopy">📄 复制</div>
             <div class="omni-menu-item" @click="handleCtxMove">✈️ 移动</div>
-            <div class="omni-menu-item danger" @click="handleCtxDelete">🗑️ 彻底删除</div>
+            <div class="omni-menu-item danger" @click="handleCtxDelete">🗑️ 删除</div>
           </div>
         </div>
 
@@ -655,6 +655,38 @@
             </div>
           </div>
         </div>
+
+        <!-- 模态框 5：删除二次确认 (双栏内嵌模态框，还原 OpenList 原生风格) -->
+        <div v-if="deleteModal.visible" class="sub-modal-mask" @click.self="deleteModal.visible = false">
+          <div class="sub-modal-box" style="width: 420px;">
+            <div class="rn-header" style="margin-bottom: 14px;">
+              <span style="display: flex; align-items: center; gap: 6px; font-weight: bold; color: #1e293b;">
+                🗑️ 确认删除
+              </span>
+              <span class="rn-close-x" @click="deleteModal.visible = false">✕</span>
+            </div>
+            <div style="font-size: 14px; color: #334155; margin-bottom: 12px; line-height: 1.6;">
+              确定要删除选中的 <b style="color: #ef4444;">{{ deleteModal.names.length }}</b> 个项目吗？
+            </div>
+            <div
+              v-if="deleteModal.names.length <= 6"
+              style="max-height: 140px; overflow-y: auto; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px 12px; margin-bottom: 16px; font-size: 12px; color: #64748b;"
+            >
+              <div v-for="name in deleteModal.names" :key="name" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.8;">
+                • {{ name }}
+              </div>
+            </div>
+            <div v-else style="font-size: 12px; color: #94a3b8; margin-bottom: 16px;">
+              包含：{{ deleteModal.names.slice(0, 3).join('、') }} 等共 {{ deleteModal.names.length }} 项
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 10px;">
+              <button class="omni-btn btn-cancel" @click="deleteModal.visible = false">取消</button>
+              <button class="omni-btn btn-danger" :disabled="deleteModal.submitting" @click="confirmDeleteAction">
+                {{ deleteModal.submitting ? '删除中...' : '确定删除' }}
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </teleport>
@@ -677,6 +709,68 @@ const SUBTITLE_PRESETS = [
   { label: '.繁中.zh-TW', value: '.繁中.zh-TW' },
   { label: '无标签 (清空)', value: '_blank' },
 ]
+
+// ==========================================
+// 方案 A：本地存储持久化偏好设置 (自动记忆上次选择)
+// ==========================================
+const STORAGE_KEY_MOVIE_PREFS = 'pcs_dual_movie_rename_prefs'
+const STORAGE_KEY_TMDB_PREFS = 'pcs_dual_tmdb_prefs'
+
+interface MovieRenamePrefs {
+  prefixMode?: 'clean' | 'default' | 'folder' | 'custom'
+  customText?: string
+  subMode?: 'auto' | 'preset' | 'custom' | 'none'
+  subPreset?: string
+  subCustom?: string
+}
+
+function loadMovieRenamePrefs(): MovieRenamePrefs {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_MOVIE_PREFS)
+    return raw ? JSON.parse(raw) : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveMovieRenamePrefs() {
+  try {
+    localStorage.setItem(
+      STORAGE_KEY_MOVIE_PREFS,
+      JSON.stringify({
+        prefixMode: movieRename.prefixMode,
+        customText: movieRename.customText,
+        subMode: movieRename.subMode,
+        subPreset: movieRename.subPreset,
+        subCustom: movieRename.subCustom,
+      })
+    )
+  } catch {}
+}
+
+interface TmdbPrefs {
+  format?: 'standard' | 'full' | 'year' | 'name'
+}
+
+function loadTmdbPrefs(): TmdbPrefs {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_TMDB_PREFS)
+    return raw ? JSON.parse(raw) : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveTmdbPrefs() {
+  try {
+    localStorage.setItem(
+      STORAGE_KEY_TMDB_PREFS,
+      JSON.stringify({
+        format: tmdbModal.format,
+      })
+    )
+  } catch {}
+}
 
 // 正则表达式组
 const REGEX = {
@@ -1118,32 +1212,38 @@ function getSelectedContext() {
   }
 }
 
+// 模态框 5：删除二次确认状态
+const deleteModal = reactive({
+  visible: false,
+  dir: '',
+  names: [] as string[],
+  submitting: false,
+})
+
+async function confirmDeleteAction() {
+  if (!deleteModal.dir || deleteModal.names.length === 0) return
+  deleteModal.submitting = true
+  try {
+    await callOpenListFsBackend('/api/fs/remove', { dir: deleteModal.dir, names: deleteModal.names }, deleteModal.dir)
+    ElMessage.success(`✅ 成功删除了 ${deleteModal.names.length} 个项目`)
+    deleteModal.visible = false
+    renderPane('left', true)
+    renderPane('right', true)
+  } catch (err: any) {
+    ElMessage.error(err.message || '删除失败')
+  } finally {
+    deleteModal.submitting = false
+  }
+}
+
 async function handleAction(actionType: 'copy' | 'move' | 'remove') {
   const ctx = getSelectedContext()
   if (!ctx) return
 
   if (actionType === 'remove') {
-    try {
-      await ElMessageBox.confirm(`彻底删除选中的 ${ctx.names.length} 个项目？此操作不可逆！`, '删除确认', {
-        type: 'warning',
-        confirmButtonText: '确定删除',
-        cancelButtonText: '取消',
-      })
-    } catch {
-      return
-    }
-
-    executingAction.value = true
-    try {
-      await callOpenListFsBackend('/api/fs/remove', { dir: ctx.src_dir, names: ctx.names }, ctx.src_dir)
-      ElMessage.success(`✅ 成功删除了 ${ctx.names.length} 个项目`)
-      renderPane('left', true)
-      renderPane('right', true)
-    } catch (err: any) {
-      ElMessage.error(err.message || '删除失败')
-    } finally {
-      executingAction.value = false
-    }
+    deleteModal.dir = ctx.src_dir
+    deleteModal.names = [...ctx.names]
+    deleteModal.visible = true
     return
   }
 
@@ -1373,9 +1473,12 @@ function openMovieRenameModal() {
     return { src_name: name, is_dir: meta ? meta.is_dir : false, manual_new_name: null }
   })
   movieRename.items = rows
+
+  // 加载记忆偏好 (方案 A)
+  const savedMoviePrefs = loadMovieRenamePrefs()
   movieRename.parseMode = 'regex'
-  movieRename.prefixMode = movieRename.paneRealSeason ? 'clean' : 'default'
-  movieRename.customText = ''
+  movieRename.prefixMode = savedMoviePrefs.prefixMode ?? (movieRename.paneRealSeason ? 'clean' : 'default')
+  movieRename.customText = savedMoviePrefs.customText ?? ''
   movieRename.sequenceStartNum = 1
 
   let maxNum = rows.length
@@ -1384,13 +1487,29 @@ function openMovieRenameModal() {
     if (an.first !== null && an.first > maxNum) maxNum = an.first
   })
   movieRename.sequencePadNum = Math.max(2, String(maxNum).length)
-  movieRename.subMode = 'auto'
-  movieRename.subPreset = '.简中.zh'
-  movieRename.subCustom = ''
+  movieRename.subMode = savedMoviePrefs.subMode ?? 'auto'
+  movieRename.subPreset = savedMoviePrefs.subPreset ?? '.简中.zh'
+  movieRename.subCustom = savedMoviePrefs.subCustom ?? ''
   movieRename.editingIdx = null
   movieRename.editingName = ''
   movieRename.visible = true
 }
+
+// 监听影视重命名选项变化，自动存入 localStorage (方案 A)
+watch(
+  () => [
+    movieRename.prefixMode,
+    movieRename.customText,
+    movieRename.subMode,
+    movieRename.subPreset,
+    movieRename.subCustom,
+  ],
+  () => {
+    if (movieRename.visible) {
+      saveMovieRenamePrefs()
+    }
+  }
+)
 
 function getRowComputedName(index: number): string {
   const obj = movieRename.items[index]
@@ -1633,13 +1752,24 @@ function handleCtxTmdbScrape() {
   tmdbModal.query = parsed.query
   tmdbModal.year = parsed.year
   tmdbModal.tmdbId = parsed.tmdbId
-  tmdbModal.format = 'standard'
+  const savedTmdb = loadTmdbPrefs()
+  tmdbModal.format = savedTmdb.format || 'standard'
   tmdbModal.error = null
   tmdbModal.results = []
   tmdbModal.visible = true
   closeContextMenu()
   performTmdbSearch()
 }
+
+// 监听 TMDB 刮削格式变化，自动存入 localStorage (方案 A)
+watch(
+  () => tmdbModal.format,
+  () => {
+    if (tmdbModal.visible) {
+      saveTmdbPrefs()
+    }
+  }
+)
 
 async function fetchTmdbData(url: string): Promise<any> {
   try {
