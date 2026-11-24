@@ -713,6 +713,7 @@ import {
   openInBrowser,
   isMediaFile,
   isVideoFile,
+  findMatchingSubtitles,
   findNeighborEpisode,
   formatEpisodeLabel,
   refreshOpenListDir,
@@ -2471,7 +2472,12 @@ function handleContextMenuSelect(key: string) {
       if (res.error) {
         ElMessage.warning(res.error)
       } else if (res.url) {
-        launchMpv(res.url, first.size, first.server_filename, openListStore.config.desktopScheme)
+        const subUrls = getOpenListSubUrlsForFile(
+          currentDir.value,
+          first.server_filename,
+          fileList.value.map((f) => f.server_filename)
+        )
+        launchMpv(res.url, first.size, first.server_filename, openListStore.config.desktopScheme, subUrls)
         if (isVideoFile(first.server_filename)) {
           activeEpisodePlayback.value = {
             dir: currentDir.value,
@@ -2484,6 +2490,17 @@ function handleContextMenuSelect(key: string) {
       break
     }
   }
+}
+
+function getOpenListSubUrlsForFile(dir: string, videoName: string, candidateNames: string[]): string[] {
+  const activeUser = authStore.activeAccount || authStore.user
+  const matched = findMatchingSubtitles(videoName, candidateNames)
+  const subUrls: string[] = []
+  for (const subName of matched) {
+    const subRes = getOpenListDirectUrl(activeUser, dir, subName, openListStore.config)
+    if (subRes.url) subUrls.push(subRes.url)
+  }
+  return subUrls
 }
 
 function handleEpisodeClose() {
@@ -2515,7 +2532,8 @@ function handleEpisodeSwitch(dir: -1 | 1) {
       const targetFile = fileList.value.find((f) => f.server_filename === neighbor.name)
       const label = (neighbor.key ? formatEpisodeLabel(neighbor.key) + '：' : '') + neighbor.name
       if (currentPb.playMode === 'mpv') {
-        launchMpv(res.url, targetFile?.size, label, openListStore.config.desktopScheme)
+        const subUrls = getOpenListSubUrlsForFile(currentPb.dir, neighbor.name, allNames)
+        launchMpv(res.url, targetFile?.size, label, openListStore.config.desktopScheme, subUrls)
       } else {
         openInBrowser(res.url, targetFile?.size, label)
       }
@@ -2558,7 +2576,12 @@ function handleEpisodeReLaunch() {
   if (res.url) {
     const targetFile = fileList.value.find((f) => f.server_filename === currentPb.filename)
     if (currentPb.playMode === 'mpv') {
-      launchMpv(res.url, targetFile?.size, currentPb.filename, openListStore.config.desktopScheme)
+      const allNames =
+        currentDir.value === currentPb.dir
+          ? fileList.value.map((f) => f.server_filename)
+          : currentPb.cachedFilenames
+      const subUrls = getOpenListSubUrlsForFile(currentPb.dir, currentPb.filename, allNames)
+      launchMpv(res.url, targetFile?.size, currentPb.filename, openListStore.config.desktopScheme, subUrls)
     } else {
       openInBrowser(res.url, targetFile?.size, currentPb.filename)
     }

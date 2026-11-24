@@ -752,6 +752,7 @@ import {
   openInBrowser,
   copyDirectUrl,
   isVideoFile,
+  findMatchingSubtitles,
   findNeighborEpisode,
   formatEpisodeLabel,
   splitPath,
@@ -1208,13 +1209,30 @@ function getOpenListItemUrls(side: 'left' | 'right', item: OpenListItem) {
   }
 }
 
+function getOpenListSubUrls(
+  side: 'left' | 'right',
+  videoName: string,
+  candidateNames?: string[],
+  dir?: string
+): string[] {
+  const allNames = candidateNames || panes[side].items.map((it) => it.name)
+  const matched = findMatchingSubtitles(videoName, allNames)
+  const base = (openListStore.config.baseUrl || '').replace(/\/+$/, '')
+  const parent = dir || panes[side].path
+  return matched.map((subName) => {
+    const fullPath = parent === '/' ? `/${subName}` : `${parent}/${subName}`
+    return `${base}/d/${splitPath(fullPath).map(encodeURIComponent).join('/')}`
+  })
+}
+
 function handleCtxMpv() {
   if (!ctxMenu.item) return
   const item = ctxMenu.item
   const side = ctxMenu.side
   closeContextMenu()
   const { directUrl } = getOpenListItemUrls(side, item)
-  launchMpv(directUrl, item.size, item.name, openListStore.config.desktopScheme)
+  const subUrls = getOpenListSubUrls(side, item.name)
+  launchMpv(directUrl, item.size, item.name, openListStore.config.desktopScheme, subUrls)
   if (isVideoFile(item.name)) {
     activeEpisodePlayback.value = {
       side,
@@ -1285,7 +1303,8 @@ function handleEpisodeSwitch(dir: -1 | 1) {
     const label = (neighbor.key ? formatEpisodeLabel(neighbor.key) + '：' : '') + neighbor.name
 
     if (currentPb.playMode === 'mpv') {
-      launchMpv(directUrl, targetItem?.size, label, openListStore.config.desktopScheme)
+      const subUrls = getOpenListSubUrls(side, neighbor.name, allNames, currentPb.dir)
+      launchMpv(directUrl, targetItem?.size, label, openListStore.config.desktopScheme, subUrls)
     } else {
       openInBrowser(directUrl, targetItem?.size, label)
     }
@@ -1315,7 +1334,12 @@ function handleEpisodeReLaunch() {
   const label = currentPb.filename
 
   if (currentPb.playMode === 'mpv') {
-    launchMpv(directUrl, targetItem?.size, label, openListStore.config.desktopScheme)
+    const allNames =
+      panes[side].path === currentPb.dir
+        ? panes[side].items.map((f) => f.name)
+        : currentPb.cachedFilenames
+    const subUrls = getOpenListSubUrls(side, currentPb.filename, allNames, currentPb.dir)
+    launchMpv(directUrl, targetItem?.size, label, openListStore.config.desktopScheme, subUrls)
   } else {
     openInBrowser(directUrl, targetItem?.size, label)
   }

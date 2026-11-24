@@ -4,6 +4,7 @@ import { refreshOpenListBackend, testOpenListBackend } from '@/api/config'
 
 export const MEDIA_EXT = /\.(mkv|mp4|avi|ts|m2ts|flv|wmv|mov|rmvb|webm|m4v|mpg|mpeg|mp3|flac|m4a|wav|aac|ogg|opus|ape|wma)$/i
 export const VIDEO_EXT = /\.(mkv|mp4|avi|ts|m2ts|flv|wmv|mov|rmvb|webm|m4v|mpg|mpeg)$/i
+export const SUBTITLE_EXT = /\.(srt|ass|ssa|vtt|sub|idx|sup)$/i
 
 export function isMediaFile(name: string): boolean {
   return MEDIA_EXT.test(name)
@@ -11,6 +12,45 @@ export function isMediaFile(name: string): boolean {
 
 export function isVideoFile(name: string): boolean {
   return VIDEO_EXT.test(name)
+}
+
+export function isSubtitleFile(name: string): boolean {
+  return SUBTITLE_EXT.test(name)
+}
+
+/**
+ * 按照 Jellyfin 规范匹配同目录下的同名/相关外挂字幕文件
+ * 支持完全同名、语言标识（.zh, .zh-CN, .en, .chi）、中文标签（.简中, .繁中, .中字）及标志位（.default, .forced）等
+ */
+export function findMatchingSubtitles(videoName: string, allFilenames: string[]): string[] {
+  const lastDot = videoName.lastIndexOf('.')
+  if (lastDot <= 0) return []
+  const videoBase = videoName.substring(0, lastDot).toLowerCase()
+
+  const matched: string[] = []
+  for (const name of allFilenames) {
+    if (name === videoName) continue
+    const subDot = name.lastIndexOf('.')
+    if (subDot <= 0) continue
+    const ext = name.substring(subDot)
+    if (!SUBTITLE_EXT.test(ext)) continue
+
+    const subBase = name.substring(0, subDot).toLowerCase()
+    if (subBase === videoBase || subBase.startsWith(videoBase + '.')) {
+      matched.push(name)
+    }
+  }
+
+  // 优先级排序：中文标识（zh, chi, zho, chs, cht, 简, 繁, 中字, 双语）优先排在前列
+  const zhReg = /(\.|\b)(zh|chi|zho|chs|cht|简|繁|中字|双语)(\.|\b)/i
+  matched.sort((a, b) => {
+    const aZh = zhReg.test(a) ? 1 : 0
+    const bZh = zhReg.test(b) ? 1 : 0
+    if (aZh !== bZh) return bZh - aZh
+    return a.localeCompare(b, 'zh-CN')
+  })
+
+  return matched
 }
 
 export function splitPath(p: string): string[] {
@@ -207,19 +247,31 @@ export function openInBrowser(url: string, size?: number, name?: string): void {
 }
 
 /**
- * 唤起 MPV 播放器
+ * 唤起 MPV 播放器 (支持自动挂载同名外挂字幕，兼容 Android 与桌面端)
  */
-export function launchMpv(url: string, size?: number, title?: string, desktopScheme = 'mpvpcs'): void {
+export function launchMpv(
+  url: string,
+  size?: number,
+  title?: string,
+  desktopScheme = 'mpvpcs',
+  subUrls?: string[]
+): void {
   const sz = size ? `（${formatFileSize(size)}）` : ''
   const head = title ? `${title}\n` : ''
+  const subTip = subUrls && subUrls.length > 0 ? ` [已自动关联 ${subUrls.length} 个同名字幕]` : ''
   const ua = navigator.userAgent
 
   if (/Android/i.test(ua)) {
     // Android 端：尝试通过 mpv-android intent 唤起
+    // 附加 S.subtitles_location 参数以便 mpv-android (以及 VLC / MX Player 等) 自动加载字幕
+    let extra = ''
+    if (subUrls && subUrls.length > 0) {
+      extra += `S.subtitles_location=${encodeURIComponent(subUrls[0])};`
+    }
     const intent =
       url.replace(/^https:\/\//i, 'intent://') +
-      '#Intent;scheme=https;action=android.intent.action.VIEW;type=video/*;package=is.xyz.mpv;end;'
-    ElMessage.info(`${head}正在唤起 MPV Android 播放器${sz}...`)
+      `#Intent;scheme=https;action=android.intent.action.VIEW;type=video/*;package=is.xyz.mpv;${extra}end;`
+    ElMessage.info(`${head}正在唤起 MPV Android 播放器${sz}${subTip}...`)
     window.location.href = intent
     return
   }
@@ -229,9 +281,16 @@ export function launchMpv(url: string, size?: number, title?: string, desktopSch
     return
   }
 
-  // 桌面端（Windows / macOS / Linux）：使用注册表自定义协议唤起
-  const schemeUrl = url.replace(/^https?:\/\//i, `${desktopScheme}://`)
-  ElMessage.info(`${head}正在唤起本地 MPV 播放器${sz}...`)
+  // 桌面端（Windows / macOS / Linux）：使用自定义协议唤起
+  // 若存在同名字幕，将字幕直链作为 ?sub=... 参数追加到链接后，由本地 handler.ps1 转换为 --sub-file 参数注入 MPV
+  let finalUrl = url
+  if (subUrls && subUrls.length > 0) {
+    const subParams = subUrls.map((s) => `sub=${encodeURIComponent(s)}`).join('&')
+    finalUrl = finalUrl.includes('?') ? `${finalUrl}&${subParams}` : `${finalUrl}?${subParams}`
+  }
+
+  const schemeUrl = finalUrl.replace(/^https?:\/\//i, `${desktopScheme}://`)
+  ElMessage.info(`${head}正在唤起本地 MPV 播放器${sz}${subTip}...`)
   window.location.href = schemeUrl
 }
 
