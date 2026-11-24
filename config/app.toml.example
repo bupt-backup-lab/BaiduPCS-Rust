@@ -82,8 +82,39 @@ baseUrl = "https://openlist.example.com:11443"
 username = ""
 password = ""
 
-# 电脑端唤起 MPV 播放器的自定义协议（默认 mpvpcs）
+# 电脑端唤起播放器的自定义协议（默认 mpvpcs，通过本地 handler.ps1 调度）
 desktopScheme = "mpvpcs"
+
+# 安卓移动端播放器包名（androidPackage）
+# 规则说明：
+# 1. 留空 ""（推荐）：点击播放时，安卓系统会弹出标准的“选择打开方式”弹窗，
+#    自动列出手机内所有支持播放的 App（VLC、MPV、MX Player 等），由您自主选择并可勾选“始终”。
+# 2. 填写具体包名：直接静默直达该 App，跳过系统选择弹窗。
+#
+# 常见安卓播放器包名列表：
+# - ""                          : 弹出系统应用选择弹窗（由您随心选择）
+# - "org.videolan.vlc"          : VLC for Android（强烈推荐，完美支持网络外挂字幕自动加载）
+# - "is.xyz.mpv"                : MPV for Android（原版 MPV）
+# - "com.mxtech.videoplayer.ad" : MX Player 免费版
+# - "com.mxtech.videoplayer.pro": MX Player 专业版 Pro
+# - "com.brouken.player"        : Just Player（轻量简洁播放器）
+# - "org.courville.nova"        : Nova Video Player
+# - "org.xbmc.kodi"             : Kodi
+androidPackage = ""
+
+# 苹果 iOS 移动端播放器 Scheme（iosScheme）
+# 规则说明：
+# 1. 留空 ""：在 iOS 浏览器中使用原生播放器直接播放。
+# 2. 填写 Scheme：点击后自动跳转并调起对应的 iOS 播放器 App。
+#
+# 常见 iOS 播放器 URL Scheme：
+# - ""                          : 浏览器内置原生播放
+# - "vlc"                       : VLC for Mobile (vlc-x-callback://...)
+# - "infuse"                    : Infuse (支持 infuse://x-callback-url/play?url=...&sub=...)
+# - "nplayer-https"             : nPlayer (nplayer-https://...)
+# - "vidhub"                    : VidHub
+# - "fileball"                  : Fileball
+iosScheme = ""
 
 # 未手动配置挂载路径时，是否自动按 "/{百度用户名}" 推导
 autoMountByUsername = true

@@ -27,6 +27,10 @@ export interface OpenListConfig {
   hasPassword?: boolean
   /** 桌面端自定义协议名，用于唤起 mpv，默认 "mpvpcs" */
   desktopScheme: string
+  /** 安卓端播放器包名：留空表示弹出选择器，支持指定如 "org.videolan.vlc", "is.xyz.mpv" 等 */
+  androidPackage?: string
+  /** iOS 端播放器 Scheme：留空表示浏览器播放，支持指定如 "vlc", "infuse", "nplayer-https" 等 */
+  iosScheme?: string
   /** 未手动配置挂载路径时，是否自动按 "/用户名" 猜测 */
   autoMountByUsername: boolean
   /** 无法识别账号时的兜底挂载路径 */

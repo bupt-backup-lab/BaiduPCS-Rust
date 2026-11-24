@@ -41,6 +41,12 @@ pub struct OpenListConfig {
     /// 桌面端自定义协议名，用于唤起 mpv，默认 "mpvpcs"
     #[serde(default = "default_desktop_scheme", alias = "desktopScheme")]
     pub desktop_scheme: String,
+    /// 安卓端播放器包名：留空表示弹出系统选择器，支持指定如 "org.videolan.vlc", "is.xyz.mpv" 等
+    #[serde(default, alias = "androidPackage")]
+    pub android_package: String,
+    /// iOS 端播放器 Scheme：留空表示浏览器播放，支持指定如 "vlc", "infuse", "nplayer-https" 等
+    #[serde(default, alias = "iosScheme")]
+    pub ios_scheme: String,
     /// 未手动配置挂载路径时，是否自动按 "/用户名" 猜测
     #[serde(default = "default_true", alias = "autoMountByUsername")]
     pub auto_mount_by_username: bool,
@@ -76,6 +82,8 @@ impl Default for OpenListConfig {
             username: String::new(),
             password: String::new(),
             desktop_scheme: default_desktop_scheme(),
+            android_package: String::new(),
+            ios_scheme: String::new(),
             auto_mount_by_username: true,
             fallback_mount: String::new(),
             takeover_mode: default_takeover_mode(),
