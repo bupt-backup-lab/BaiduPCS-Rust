@@ -701,8 +701,6 @@ import {
   Refresh as RefreshIcon,
   Upload as UploadIcon,
   VideoPlay as VideoPlayIcon,
-  DArrowLeft as DArrowLeftIcon,
-  DArrowRight as DArrowRightIcon,
   Document as DocumentIcon,
 } from '@element-plus/icons-vue'
 import {
@@ -2449,51 +2447,28 @@ function handleContextMenuSelect(key: string) {
       break
     }
     case 'openlist-open': {
-      const activeUser = authStore.activeAccount || authStore.user
-      const res = getOpenListDirectUrl(activeUser, currentDir.value, first.server_filename, openListStore.config)
-      if (res.error) {
-        ElMessage.warning(res.error)
-      } else if (res.url) {
-        openInBrowser(res.url, first.size, first.server_filename)
+      const allNames = fileList.value.map((f) => f.server_filename)
+      if (launchOpenListMediaInFiles(currentDir.value, first.server_filename, 'browser', allNames, first.size)) {
         if (isVideoFile(first.server_filename)) {
           activeEpisodePlayback.value = {
             dir: currentDir.value,
             filename: first.server_filename,
             playMode: 'browser',
-            cachedFilenames: fileList.value.map((f) => f.server_filename),
+            cachedFilenames: allNames,
           }
         }
       }
       break
     }
     case 'openlist-mpv': {
-      const activeUser = authStore.activeAccount || authStore.user
-      const res = getOpenListDirectUrl(activeUser, currentDir.value, first.server_filename, openListStore.config)
-      if (res.error) {
-        ElMessage.warning(res.error)
-      } else if (res.url) {
-        const subUrls = getOpenListSubUrlsForFile(
-          currentDir.value,
-          first.server_filename,
-          fileList.value.map((f) => f.server_filename)
-        )
-        launchMpv(
-          res.url,
-          first.size,
-          first.server_filename,
-          openListStore.config.desktopScheme,
-          subUrls,
-          {
-            androidPackage: openListStore.config.androidPackage,
-            iosScheme: openListStore.config.iosScheme,
-          }
-        )
+      const allNames = fileList.value.map((f) => f.server_filename)
+      if (launchOpenListMediaInFiles(currentDir.value, first.server_filename, 'mpv', allNames, first.size)) {
         if (isVideoFile(first.server_filename)) {
           activeEpisodePlayback.value = {
             dir: currentDir.value,
             filename: first.server_filename,
             playMode: 'mpv',
-            cachedFilenames: fileList.value.map((f) => f.server_filename),
+            cachedFilenames: allNames,
           }
         }
       }
@@ -2511,6 +2486,42 @@ function getOpenListSubUrlsForFile(dir: string, videoName: string, candidateName
     if (subRes.url) subUrls.push(subRes.url)
   }
   return subUrls
+}
+
+function launchOpenListMediaInFiles(
+  dir: string,
+  filename: string,
+  playMode: 'mpv' | 'browser',
+  candidateNames: string[],
+  size?: number,
+  displayTitle?: string
+): boolean {
+  const activeUser = authStore.activeAccount || authStore.user
+  const res = getOpenListDirectUrl(activeUser, dir, filename, openListStore.config)
+  if (res.error) {
+    ElMessage.warning(res.error)
+    return false
+  }
+  if (!res.url) return false
+
+  const title = displayTitle || filename
+  if (playMode === 'mpv') {
+    const subUrls = getOpenListSubUrlsForFile(dir, filename, candidateNames)
+    launchMpv(
+      res.url,
+      size,
+      title,
+      openListStore.config.desktopScheme,
+      subUrls,
+      {
+        androidPackage: openListStore.config.androidPackage,
+        iosScheme: openListStore.config.iosScheme,
+      }
+    )
+  } else {
+    openInBrowser(res.url, size, title)
+  }
+  return true
 }
 
 function handleEpisodeClose() {
@@ -2532,31 +2543,9 @@ function handleEpisodeSwitch(dir: -1 | 1) {
   }
 
   if (neighbor.name) {
-    const activeUser = authStore.activeAccount || authStore.user
-    const res = getOpenListDirectUrl(activeUser, currentPb.dir, neighbor.name, openListStore.config)
-    if (res.error) {
-      ElMessage.warning(res.error)
-      return
-    }
-    if (res.url) {
-      const targetFile = fileList.value.find((f) => f.server_filename === neighbor.name)
-      const label = (neighbor.key ? formatEpisodeLabel(neighbor.key) + '：' : '') + neighbor.name
-      if (currentPb.playMode === 'mpv') {
-        const subUrls = getOpenListSubUrlsForFile(currentPb.dir, neighbor.name, allNames)
-        launchMpv(
-          res.url,
-          targetFile?.size,
-          label,
-          openListStore.config.desktopScheme,
-          subUrls,
-          {
-            androidPackage: openListStore.config.androidPackage,
-            iosScheme: openListStore.config.iosScheme,
-          }
-        )
-      } else {
-        openInBrowser(res.url, targetFile?.size, label)
-      }
+    const targetFile = fileList.value.find((f) => f.server_filename === neighbor.name)
+    const label = (neighbor.key ? formatEpisodeLabel(neighbor.key) + '：' : '') + neighbor.name
+    if (launchOpenListMediaInFiles(currentPb.dir, neighbor.name, currentPb.playMode, allNames, targetFile?.size, label)) {
       activeEpisodePlayback.value.filename = neighbor.name
       ElMessage.success(`已切换至${dir > 0 ? '下一集' : '上一集'}：${label}`)
     }
@@ -2582,40 +2571,12 @@ function handleEpisodeCopy() {
 function handleEpisodeReLaunch() {
   if (!activeEpisodePlayback.value) return
   const currentPb = activeEpisodePlayback.value
-  const activeUser = authStore.activeAccount || authStore.user
-  const res = getOpenListDirectUrl(
-    activeUser,
-    currentPb.dir,
-    currentPb.filename,
-    openListStore.config
-  )
-  if (res.error) {
-    ElMessage.warning(res.error)
-    return
-  }
-  if (res.url) {
-    const targetFile = fileList.value.find((f) => f.server_filename === currentPb.filename)
-    if (currentPb.playMode === 'mpv') {
-      const allNames =
-        currentDir.value === currentPb.dir
-          ? fileList.value.map((f) => f.server_filename)
-          : currentPb.cachedFilenames
-      const subUrls = getOpenListSubUrlsForFile(currentPb.dir, currentPb.filename, allNames)
-      launchMpv(
-        res.url,
-        targetFile?.size,
-        currentPb.filename,
-        openListStore.config.desktopScheme,
-        subUrls,
-        {
-          androidPackage: openListStore.config.androidPackage,
-          iosScheme: openListStore.config.iosScheme,
-        }
-      )
-    } else {
-      openInBrowser(res.url, targetFile?.size, currentPb.filename)
-    }
-  }
+  const targetFile = fileList.value.find((f) => f.server_filename === currentPb.filename)
+  const allNames =
+    currentDir.value === currentPb.dir
+      ? fileList.value.map((f) => f.server_filename)
+      : currentPb.cachedFilenames
+  launchOpenListMediaInFiles(currentPb.dir, currentPb.filename, currentPb.playMode, allNames, targetFile?.size, currentPb.filename)
 }
 
 function handleOpenListGoto() {

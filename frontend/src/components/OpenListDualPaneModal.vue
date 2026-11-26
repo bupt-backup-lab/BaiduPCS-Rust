@@ -65,7 +65,7 @@
                   :key="item.name"
                   class="omni-item data-row"
                   :class="{ 'omni-item-active': ctxMenu.visible && ctxMenu.side === 'left' && ctxMenu.item?.name === item.name }"
-                  @click="handleItemClick('left', item, $event)"
+                  @click="handleItemClick('left', item)"
                   @contextmenu.prevent="openContextMenu('left', item, $event)"
                 >
                   <input
@@ -77,7 +77,7 @@
                   <span class="omni-item-title">
                     {{ item.is_dir ? '📁 ' : '📄 ' }}{{ item.name }}
                   </span>
-                  <span class="omni-more" @click.stop="openContextMenuMobile('left', item, $event)">⋯</span>
+                  <span class="omni-more" @click.stop="openContextMenuMobile('left', item)">⋯</span>
                 </div>
               </template>
             </div>
@@ -166,7 +166,7 @@
                   :key="item.name"
                   class="omni-item data-row"
                   :class="{ 'omni-item-active': ctxMenu.visible && ctxMenu.side === 'right' && ctxMenu.item?.name === item.name }"
-                  @click="handleItemClick('right', item, $event)"
+                  @click="handleItemClick('right', item)"
                   @contextmenu.prevent="openContextMenu('right', item, $event)"
                 >
                   <input
@@ -178,7 +178,7 @@
                   <span class="omni-item-title">
                     {{ item.is_dir ? '📁 ' : '📄 ' }}{{ item.name }}
                   </span>
-                  <span class="omni-more" @click.stop="openContextMenuMobile('right', item, $event)">⋯</span>
+                  <span class="omni-more" @click.stop="openContextMenuMobile('right', item)">⋯</span>
                 </div>
               </template>
             </div>
@@ -515,7 +515,11 @@
                   v-for="(row, idx) in movieRename.items"
                   :key="row.src_name"
                   class="draggable-row"
-                  :class="{ 'row-dup': rowStatus(idx).isDuplicate, 'row-err': rowStatus(idx).isMismatch, 'row-break': rowStatus(idx).isSeqBreak }"
+                  :class="{
+                    'row-dup': movieRowStatuses[idx]?.isDuplicate,
+                    'row-err': movieRowStatuses[idx]?.isMismatch,
+                    'row-break': movieRowStatuses[idx]?.isSeqBreak,
+                  }"
                   draggable="true"
                   @dragstart="handleRowDragStart(idx, $event)"
                   @dragover.prevent="handleRowDragOver(idx, $event)"
@@ -525,9 +529,9 @@
                   <div class="row-seq">[{{ idx + 1 }}]</div>
                   <div class="row-src">{{ row.src_name }}</div>
                   <div class="row-arrow">
-                    <span v-if="rowStatus(idx).isDuplicate" class="badge-dup" title="检测到同名文件，下发会互相覆盖">🚨 重复</span>
-                    <span v-else-if="rowStatus(idx).isMismatch" class="badge-err">❌ 不匹配</span>
-                    <span v-else-if="rowStatus(idx).isSeqBreak" class="badge-warn" title="未按顺序递增或存在跳号">⚠️ 跳号</span>
+                    <span v-if="movieRowStatuses[idx]?.isDuplicate" class="badge-dup" title="检测到同名文件，下发会互相覆盖">🚨 重复</span>
+                    <span v-else-if="movieRowStatuses[idx]?.isMismatch" class="badge-err">❌ 不匹配</span>
+                    <span v-else-if="movieRowStatuses[idx]?.isSeqBreak" class="badge-warn" title="未按顺序递增或存在跳号">⚠️ 跳号</span>
                     <span v-else-if="row.manual_new_name" class="badge-custom">✍️ 自定</span>
                     <span v-else class="badge-ok">🟢 ➔</span>
                   </div>
@@ -547,7 +551,7 @@
                       </div>
                     </template>
                     <template v-else>
-                      <span class="name-text-span">{{ getRowComputedName(idx) }}</span>
+                      <span class="name-text-span">{{ movieRowComputedNames[idx] }}</span>
                       <div class="inline-actions">
                         <span class="inline-edit-btn" title="单行修改" @click="startInlineEdit(idx)">✏️</span>
                         <span v-if="row.manual_new_name" class="inline-reset-btn" title="恢复自动生成" @click="row.manual_new_name = null">↺</span>
@@ -742,7 +746,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, nextTick } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { callOpenListFsBackend, proxyTmdbBackend } from '@/api/config'
 import EpisodePlayerBar from '@/components/EpisodePlayerBar.vue'
@@ -1042,7 +1046,7 @@ function toggleItemSelect(side: 'left' | 'right', name: string) {
   }
 }
 
-function handleItemClick(side: 'left' | 'right', item: OpenListItem, e: MouseEvent) {
+function handleItemClick(side: 'left' | 'right', item: OpenListItem) {
   if (item.is_dir) {
     panes[side].path = panes[side].path === '/' ? '/' + item.name : `${panes[side].path}/${item.name}`
     renderPane(side)
@@ -1194,19 +1198,20 @@ const ctxMenuStyle = computed(() => {
   return { left: `${Math.max(10, x)}px`, top: `${Math.max(10, y)}px` }
 })
 
-function getOpenListItemUrls(side: 'left' | 'right', item: OpenListItem) {
+function buildOpenListUrls(dir: string, filename: string) {
   const base = (openListStore.config.baseUrl || '').replace(/\/+$/, '')
-  const parent = panes[side].path
-  const fullPath = parent === '/' ? `/${item.name}` : `${parent}/${item.name}`
+  const fullPath = dir === '/' ? `/${filename}` : `${dir}/${filename}`
   const encodedParts = splitPath(fullPath).map(encodeURIComponent).join('/')
-  const directUrl = `${base}/d/${encodedParts}`
-  const browseUrl = `${base}/${encodedParts}`
   return {
-    directUrl,
-    browseUrl,
+    directUrl: `${base}/d/${encodedParts}`,
+    browseUrl: `${base}/${encodedParts}`,
     fullPath,
-    parent,
+    parent: dir,
   }
+}
+
+function getOpenListItemUrls(side: 'left' | 'right', item: OpenListItem) {
+  return buildOpenListUrls(panes[side].path, item.name)
 }
 
 function getOpenListSubUrls(
@@ -1217,39 +1222,54 @@ function getOpenListSubUrls(
 ): string[] {
   const allNames = candidateNames || panes[side].items.map((it) => it.name)
   const matched = findMatchingSubtitles(videoName, allNames)
-  const base = (openListStore.config.baseUrl || '').replace(/\/+$/, '')
   const parent = dir || panes[side].path
-  return matched.map((subName) => {
-    const fullPath = parent === '/' ? `/${subName}` : `${parent}/${subName}`
-    return `${base}/d/${splitPath(fullPath).map(encodeURIComponent).join('/')}`
-  })
+  return matched.map((subName) => buildOpenListUrls(parent, subName).directUrl)
+}
+
+function launchOpenListMedia(
+  side: 'left' | 'right',
+  dir: string,
+  filename: string,
+  playMode: 'mpv' | 'browser',
+  allNames: string[],
+  size?: number,
+  displayTitle?: string
+) {
+  const { directUrl } = buildOpenListUrls(dir, filename)
+  const title = displayTitle || filename
+  if (playMode === 'mpv') {
+    const subUrls = getOpenListSubUrls(side, filename, allNames, dir)
+    launchMpv(
+      directUrl,
+      size,
+      title,
+      openListStore.config.desktopScheme,
+      subUrls,
+      {
+        androidPackage: openListStore.config.androidPackage,
+        iosScheme: openListStore.config.iosScheme,
+      }
+    )
+  } else {
+    openInBrowser(directUrl, size, title)
+  }
 }
 
 function handleCtxMpv() {
   if (!ctxMenu.item) return
   const item = ctxMenu.item
   const side = ctxMenu.side
+  const dir = panes[side].path
+  const allNames = panes[side].items.map((f) => f.name)
   closeContextMenu()
-  const { directUrl } = getOpenListItemUrls(side, item)
-  const subUrls = getOpenListSubUrls(side, item.name)
-  launchMpv(
-    directUrl,
-    item.size,
-    item.name,
-    openListStore.config.desktopScheme,
-    subUrls,
-    {
-      androidPackage: openListStore.config.androidPackage,
-      iosScheme: openListStore.config.iosScheme,
-    }
-  )
+  launchOpenListMedia(side, dir, item.name, 'mpv', allNames, item.size, item.name)
   if (isVideoFile(item.name)) {
     activeEpisodePlayback.value = {
       side,
-      dir: panes[side].path,
+      dir,
       filename: item.name,
       playMode: 'mpv',
-      cachedFilenames: panes[side].items.map((f) => f.name),
+      cachedFilenames: allNames,
     }
   }
 }
@@ -1258,19 +1278,21 @@ function handleCtxOpenInBrowser() {
   if (!ctxMenu.item) return
   const item = ctxMenu.item
   const side = ctxMenu.side
+  const dir = panes[side].path
+  const allNames = panes[side].items.map((f) => f.name)
   closeContextMenu()
-  const { directUrl, browseUrl } = getOpenListItemUrls(side, item)
+  const { browseUrl } = buildOpenListUrls(dir, item.name)
   if (item.is_dir) {
     window.open(browseUrl, '_blank')
   } else {
-    openInBrowser(directUrl, item.size, item.name)
+    launchOpenListMedia(side, dir, item.name, 'browser', allNames, item.size, item.name)
     if (isVideoFile(item.name)) {
       activeEpisodePlayback.value = {
         side,
-        dir: panes[side].path,
+        dir,
         filename: item.name,
         playMode: 'browser',
-        cachedFilenames: panes[side].items.map((f) => f.name),
+        cachedFilenames: allNames,
       }
     }
   }
@@ -1306,28 +1328,8 @@ function handleEpisodeSwitch(dir: -1 | 1) {
 
   if (neighbor.name) {
     const targetItem = panes[side].items.find((f) => f.name === neighbor.name)
-    const base = (openListStore.config.baseUrl || '').replace(/\/+$/, '')
-    const fullPath = currentPb.dir === '/' ? `/${neighbor.name}` : `${currentPb.dir}/${neighbor.name}`
-    const encoded = splitPath(fullPath).map(encodeURIComponent).join('/')
-    const directUrl = `${base}/d/${encoded}`
     const label = (neighbor.key ? formatEpisodeLabel(neighbor.key) + '：' : '') + neighbor.name
-
-    if (currentPb.playMode === 'mpv') {
-      const subUrls = getOpenListSubUrls(side, neighbor.name, allNames, currentPb.dir)
-      launchMpv(
-        directUrl,
-        targetItem?.size,
-        label,
-        openListStore.config.desktopScheme,
-        subUrls,
-        {
-          androidPackage: openListStore.config.androidPackage,
-          iosScheme: openListStore.config.iosScheme,
-        }
-      )
-    } else {
-      openInBrowser(directUrl, targetItem?.size, label)
-    }
+    launchOpenListMedia(side, currentPb.dir, neighbor.name, currentPb.playMode, allNames, targetItem?.size, label)
     activeEpisodePlayback.value.filename = neighbor.name
     ElMessage.success(`已切换至${dir > 0 ? '下一集' : '上一集'}：${label}`)
   }
@@ -1336,10 +1338,7 @@ function handleEpisodeSwitch(dir: -1 | 1) {
 function handleEpisodeCopy() {
   if (!activeEpisodePlayback.value) return
   const currentPb = activeEpisodePlayback.value
-  const base = (openListStore.config.baseUrl || '').replace(/\/+$/, '')
-  const fullPath = currentPb.dir === '/' ? `/${currentPb.filename}` : `${currentPb.dir}/${currentPb.filename}`
-  const encoded = splitPath(fullPath).map(encodeURIComponent).join('/')
-  void copyDirectUrl(`${base}/d/${encoded}`)
+  void copyDirectUrl(buildOpenListUrls(currentPb.dir, currentPb.filename).directUrl)
 }
 
 function handleEpisodeReLaunch() {
@@ -1347,32 +1346,11 @@ function handleEpisodeReLaunch() {
   const currentPb = activeEpisodePlayback.value
   const side = currentPb.side
   const targetItem = panes[side].items.find((f) => f.name === currentPb.filename)
-  const base = (openListStore.config.baseUrl || '').replace(/\/+$/, '')
-  const fullPath = currentPb.dir === '/' ? `/${currentPb.filename}` : `${currentPb.dir}/${currentPb.filename}`
-  const encoded = splitPath(fullPath).map(encodeURIComponent).join('/')
-  const directUrl = `${base}/d/${encoded}`
-  const label = currentPb.filename
-
-  if (currentPb.playMode === 'mpv') {
-    const allNames =
-      panes[side].path === currentPb.dir
-        ? panes[side].items.map((f) => f.name)
-        : currentPb.cachedFilenames
-    const subUrls = getOpenListSubUrls(side, currentPb.filename, allNames, currentPb.dir)
-    launchMpv(
-      directUrl,
-      targetItem?.size,
-      label,
-      openListStore.config.desktopScheme,
-      subUrls,
-      {
-        androidPackage: openListStore.config.androidPackage,
-        iosScheme: openListStore.config.iosScheme,
-      }
-    )
-  } else {
-    openInBrowser(directUrl, targetItem?.size, label)
-  }
+  const allNames =
+    panes[side].path === currentPb.dir
+      ? panes[side].items.map((f) => f.name)
+      : currentPb.cachedFilenames
+  launchOpenListMedia(side, currentPb.dir, currentPb.filename, currentPb.playMode, allNames, targetItem?.size, currentPb.filename)
 }
 
 const episodeAllFilenames = computed<string[]>(() => {
@@ -1395,7 +1373,7 @@ function openContextMenu(side: 'left' | 'right', item: OpenListItem, e: MouseEve
   panes[side].selectedNames.add(item.name)
 }
 
-function openContextMenuMobile(side: 'left' | 'right', item: OpenListItem, e: MouseEvent) {
+function openContextMenuMobile(side: 'left' | 'right', item: OpenListItem) {
   ctxMenu.visible = true
   ctxMenu.side = side
   ctxMenu.item = item
@@ -1587,27 +1565,37 @@ function openNativeRenameModal() {
 
 function generateBatchPreview() {
   if (!batchRename.context) return
+  let regex: RegExp | null = null
+  if (batchRename.mode === 'regex') {
+    try {
+      regex = new RegExp(batchRename.in1, 'g')
+    } catch {
+      ElMessage.warning('源文件名正则表达式格式有误，请检查语法')
+      return
+    }
+  }
   const names = batchRename.context.names
+  const parsedStart = parseInt(batchRename.in2, 10)
+  const start = Number.isNaN(parsedStart) ? 1 : parsedStart
+  const parsedPad = parseInt(batchRename.in3, 10)
+  const pad = Number.isNaN(parsedPad) || parsedPad < 1 ? 1 : parsedPad
+
   batchRename.calculatedObjects = names.map((oldName, index) => {
     let newName = oldName
-    try {
-      if (batchRename.mode === 'regex') {
-        newName = oldName.replace(new RegExp(batchRename.in1, 'g'), batchRename.in2)
-      } else if (batchRename.mode === 'replace') {
-        newName = oldName.split(batchRename.in1).join(batchRename.in2)
-      } else if (batchRename.mode === 'sequence') {
-        const start = parseInt(batchRename.in2, 10) || 1
-        const pad = parseInt(batchRename.in3, 10) || 1
-        const numStr = String(start + index).padStart(pad, '0')
-        const itemMeta = panes[batchRename.context!.side].items.find((i) => i.name === oldName)
-        const dot = oldName.lastIndexOf('.')
-        const ext = itemMeta && itemMeta.is_dir ? '' : dot > 0 ? oldName.substring(dot) : ''
-        const baseNewName = batchRename.in1.includes('{number}')
-          ? batchRename.in1.replace(/\{number\}/g, numStr)
-          : batchRename.in1 + numStr
-        newName = baseNewName + ext
-      }
-    } catch {}
+    if (batchRename.mode === 'regex' && regex) {
+      newName = oldName.replace(regex, batchRename.in2)
+    } else if (batchRename.mode === 'replace') {
+      newName = oldName.split(batchRename.in1).join(batchRename.in2)
+    } else if (batchRename.mode === 'sequence') {
+      const numStr = String(start + index).padStart(pad, '0')
+      const itemMeta = panes[batchRename.context!.side].items.find((i) => i.name === oldName)
+      const dot = oldName.lastIndexOf('.')
+      const ext = itemMeta && itemMeta.is_dir ? '' : dot > 0 ? oldName.substring(dot) : ''
+      const baseNewName = batchRename.in1.includes('{number}')
+        ? batchRename.in1.replace(/\{number\}/g, numStr)
+        : batchRename.in1 + numStr
+      newName = baseNewName + ext
+    }
     return { src_name: oldName, new_name: newName }
   })
   batchRename.step = 'preview'
@@ -1819,10 +1807,12 @@ function getRowComputedName(index: number): string {
     if (movieRename.prefixMode === 'clean' && movieRename.cleanMediaName) prefix = movieRename.cleanMediaName.trim() + ' '
     else if (movieRename.prefixMode === 'folder' && movieRename.autoFolderName) prefix = movieRename.autoFolderName.trim() + ' '
     else if (movieRename.prefixMode === 'custom') prefix = movieRename.customText
-    finalBase =
-      movieRename.parseMode === 'sequential'
-        ? `${movieRename.paneRealSeason}E${paddedSeq}`
-        : `${movieRename.paneRealSeason}E${analyzeEpisodeNumbers(obj.src_name, movieRename.sequencePadNum).numStr}${analyzeEpisodeNumbers(obj.src_name, movieRename.sequencePadNum).extra}`
+    if (movieRename.parseMode === 'sequential') {
+      finalBase = `${movieRename.paneRealSeason}E${paddedSeq}`
+    } else {
+      const ep = analyzeEpisodeNumbers(obj.src_name, movieRename.sequencePadNum)
+      finalBase = `${movieRename.paneRealSeason}E${ep.numStr}${ep.extra}`
+    }
   } else {
     finalBase =
       movieRename.parseMode === 'sequential'
@@ -1832,48 +1822,55 @@ function getRowComputedName(index: number): string {
   return obj.is_dir ? `${prefix}${finalBase}` : `${prefix}${finalBase}${injectedSub}${ext}`
 }
 
-function rowStatus(index: number) {
-  const currentName = getRowComputedName(index)
-  const allNames = movieRename.items.map((_, i) => getRowComputedName(i))
-  const isDuplicate = allNames.filter((n) => n === currentName).length > 1
+const movieRowComputedNames = computed<string[]>(() =>
+  movieRename.items.map((_, idx) => getRowComputedName(idx))
+)
 
-  let isSeqBreak = false
+const movieRowStatuses = computed(() => {
+  const allNames = movieRowComputedNames.value
+  const nameCounts: Record<string, number> = {}
+  for (const n of allNames) {
+    nameCounts[n] = (nameCounts[n] || 0) + 1
+  }
+
   const getNum = (name: string) => {
     const m = movieRename.paneRealSeason ? name.match(/E(\d+)/i) : name.match(/Season\s*(\d+)/i)
     return m ? parseInt(m[1], 10) : null
   }
-  if (index > 0) {
-    const prevNum = getNum(allNames[index - 1])
-    const currNum = getNum(currentName)
-    if (prevNum !== null && currNum !== null && currNum !== prevNum + 1) {
-      isSeqBreak = true
+
+  const nums = allNames.map(getNum)
+  return movieRename.items.map((obj, index) => {
+    const currentName = allNames[index]
+    const isDuplicate = (nameCounts[currentName] || 0) > 1
+    let isSeqBreak = false
+    if (index > 0) {
+      const prevNum = nums[index - 1]
+      const currNum = nums[index]
+      if (prevNum !== null && currNum !== null && currNum !== prevNum + 1) {
+        isSeqBreak = true
+      }
     }
-  }
 
-  let isMismatch = false
-  const obj = movieRename.items[index]
-  if (movieRename.parseMode === 'regex' && !obj.manual_new_name) {
-    const oldAn = movieRename.paneRealSeason ? analyzeEpisodeNumbers(obj.src_name, movieRename.sequencePadNum) : analyzeSeasonNumber(obj.src_name, movieRename.sequencePadNum)
-    const newNum = getNum(currentName)
-    if (oldAn.first !== null && newNum !== null && oldAn.first !== newNum) isMismatch = true
-  }
+    let isMismatch = false
+    if (movieRename.parseMode === 'regex' && !obj.manual_new_name) {
+      const oldAn = movieRename.paneRealSeason
+        ? analyzeEpisodeNumbers(obj.src_name, movieRename.sequencePadNum)
+        : analyzeSeasonNumber(obj.src_name, movieRename.sequencePadNum)
+      const newNum = nums[index]
+      if (oldAn.first !== null && newNum !== null && oldAn.first !== newNum) {
+        isMismatch = true
+      }
+    }
 
-  return { isDuplicate, isSeqBreak, isMismatch }
-}
+    return { isDuplicate, isSeqBreak, isMismatch }
+  })
+})
 
 const movieComputedValidation = computed(() => {
-  const allNames = movieRename.items.map((_, i) => getRowComputedName(i))
-  const nameCounts: Record<string, number> = {}
-  allNames.forEach((n) => (nameCounts[n] = (nameCounts[n] || 0) + 1))
-  const hasDuplicates = Object.values(nameCounts).some((c) => c > 1)
-
-  let hasSeqBreak = false
-  let hasMismatch = false
-  for (let i = 0; i < movieRename.items.length; i++) {
-    const st = rowStatus(i)
-    if (st.isSeqBreak) hasSeqBreak = true
-    if (st.isMismatch) hasMismatch = true
-  }
+  const statuses = movieRowStatuses.value
+  const hasDuplicates = statuses.some((s) => s.isDuplicate)
+  const hasMismatch = statuses.some((s) => s.isMismatch)
+  const hasSeqBreak = statuses.some((s) => s.isSeqBreak)
 
   if (hasDuplicates) {
     return {
@@ -1945,12 +1942,20 @@ function cancelInlineEdit() {
 }
 
 async function submitMovieRename() {
-  movieRename.submitting = true
-  const renameObjects = movieRename.items.map((_, i) => ({
-    src_name: movieRename.items[i].src_name,
-    new_name: getRowComputedName(i),
-  }))
+  const renameObjects = movieRename.items
+    .map((item, i) => ({
+      src_name: item.src_name,
+      new_name: movieRowComputedNames.value[i],
+    }))
+    .filter((o) => o.src_name !== o.new_name)
 
+  if (renameObjects.length === 0) {
+    ElMessage.info('所有文件名均未发生变化，无需修改')
+    movieRename.visible = false
+    return
+  }
+
+  movieRename.submitting = true
   try {
     await callOpenListFsBackend(
       '/api/fs/batch_rename',
@@ -2167,10 +2172,16 @@ async function applyTmdbRename(card: TmdbCardResult) {
   }
 }
 
+function handleResize() {
+  isMobile.value = window.innerWidth < 768
+}
+
 onMounted(() => {
-  window.addEventListener('resize', () => {
-    isMobile.value = window.innerWidth < 768
-  })
+  window.addEventListener('resize', handleResize)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleResize)
 })
 </script>
 

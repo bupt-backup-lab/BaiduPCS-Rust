@@ -273,9 +273,10 @@ export function launchMpv(
     // 若未指定包名（留空），则不加 package= 参数，由 Android 系统弹出“打开方式”选择列表！
     const pkg = mobileConfig?.androidPackage?.trim()
     const pkgPart = pkg ? `package=${encodeURIComponent(pkg)};` : ''
+    const urlScheme = /^https:\/\//i.test(url) ? 'https' : 'http'
     const intent =
-      url.replace(/^https:\/\//i, 'intent://') +
-      `#Intent;scheme=https;action=android.intent.action.VIEW;type=video/*;${pkgPart}${extra}end;`
+      url.replace(/^https?:\/\//i, 'intent://') +
+      `#Intent;scheme=${urlScheme};action=android.intent.action.VIEW;type=video/*;${pkgPart}${extra}end;`
     const appLabel = pkg ? `（${pkg}）` : '系统播放器选择列表'
     ElMessage.info(`${head}正在唤起 ${appLabel}${sz}${subTip}...`)
     window.location.href = intent
@@ -286,12 +287,12 @@ export function launchMpv(
     // iOS 端：若配置了 iosScheme 则通过对应 URL Scheme 唤起
     const iosScheme = mobileConfig?.iosScheme?.trim()
     if (iosScheme) {
+      const subPart = subUrls && subUrls.length > 0 ? `&sub=${encodeURIComponent(subUrls[0])}` : ''
+      const lowerScheme = iosScheme.toLowerCase()
       let schemeUrl = ''
-      if (iosScheme.toLowerCase() === 'infuse') {
-        const subPart = subUrls && subUrls.length > 0 ? `&sub=${encodeURIComponent(subUrls[0])}` : ''
+      if (lowerScheme === 'infuse') {
         schemeUrl = `infuse://x-callback-url/play?url=${encodeURIComponent(url)}${subPart}`
-      } else if (iosScheme.toLowerCase() === 'vlc') {
-        const subPart = subUrls && subUrls.length > 0 ? `&sub=${encodeURIComponent(subUrls[0])}` : ''
+      } else if (lowerScheme === 'vlc') {
         schemeUrl = `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(url)}${subPart}`
       } else if (iosScheme.includes('://')) {
         schemeUrl = `${iosScheme}${url}`
@@ -421,6 +422,35 @@ export function formatEpisodeLabel(k: number): string {
   return '第 ' + k + ' 集'
 }
 
+interface EpisodeEntry {
+  name: string
+  key: number
+}
+
+function analyzeEpisodeSeries(allNames: string[], currentName: string) {
+  const vids = allNames.filter(isVideoFile)
+  if (!vids.includes(currentName)) return { error: '当前选中的不是视频文件' as const }
+
+  const keys = episodeKeys(vids)
+  const entries = vids
+    .map((name, i) => ({ name, key: keys[i] }))
+    .filter((e): e is EpisodeEntry => e.key !== null)
+
+  const cur = entries.find((e) => e.name === currentName)
+  const uniq = [...new Set(entries.map((e) => e.key))].sort((a, b) => a - b)
+  if (!cur || uniq.length < 2) {
+    return { error: '未识别到集数序列（可能是单部电影）' as const }
+  }
+
+  return { entries, cur, uniq, curIdx: uniq.indexOf(cur.key) }
+}
+
+function pickBestCandidate(entries: EpisodeEntry[], key: number, currentName: string): EpisodeEntry | undefined {
+  const candidates = entries.filter((e) => e.key === key)
+  candidates.sort((a, b) => similarity(b.name, currentName) - similarity(a.name, currentName))
+  return candidates[0]
+}
+
 /**
  * 智能查找相邻集（上一集 / 下一集）
  */
@@ -429,24 +459,15 @@ export function findNeighborEpisode(
   currentName: string,
   dir: -1 | 1
 ): { name?: string; key?: number; error?: string } {
-  const vids = allNames.filter(isVideoFile)
-  if (!vids.includes(currentName)) return { error: '当前选中的不是视频文件' }
-  const keys = episodeKeys(vids)
-  const entries = vids
-    .map((name, i) => ({ name, key: keys[i] }))
-    .filter((e): e is { name: string; key: number } => e.key !== null)
+  const series = analyzeEpisodeSeries(allNames, currentName)
+  if ('error' in series) return { error: series.error }
 
-  const cur = entries.find((e) => e.name === currentName)
-  const uniq = [...new Set(entries.map((e) => e.key))].sort((a, b) => a - b)
-  if (!cur || uniq.length < 2) return { error: '未识别到集数序列（可能是单部电影）' }
-
-  const idx = uniq.indexOf(cur.key) + dir
+  const idx = series.curIdx + dir
   if (idx < 0) return { error: '已经是第一集了' }
-  if (idx >= uniq.length) return { error: '已经是最后一集了' }
+  if (idx >= series.uniq.length) return { error: '已经是最后一集了' }
 
-  const candidates = entries.filter((e) => e.key === uniq[idx])
-  candidates.sort((a, b) => similarity(b.name, currentName) - similarity(a.name, currentName))
-  return { name: candidates[0].name, key: candidates[0].key }
+  const best = pickBestCandidate(series.entries, series.uniq[idx], currentName)
+  return best ? { name: best.name, key: best.key } : { error: '未找到相邻集文件' }
 }
 
 export interface EpisodeInfo {
@@ -464,48 +485,25 @@ export interface EpisodeInfo {
  * 分析当前文件是否为剧集序列中的一集，并获取前后集信息
  */
 export function getEpisodeInfo(allNames: string[], currentName: string): EpisodeInfo {
-  const vids = allNames.filter(isVideoFile)
-  if (!vids.includes(currentName)) {
-    return { isEpisode: false, hasPrev: false, hasNext: false }
-  }
-  const keys = episodeKeys(vids)
-  const entries = vids
-    .map((name, i) => ({ name, key: keys[i] }))
-    .filter((e): e is { name: string; key: number } => e.key !== null)
-
-  const cur = entries.find((e) => e.name === currentName)
-  const uniq = [...new Set(entries.map((e) => e.key))].sort((a, b) => a - b)
-  if (!cur || uniq.length < 2) {
+  const series = analyzeEpisodeSeries(allNames, currentName)
+  if ('error' in series) {
     return { isEpisode: false, hasPrev: false, hasNext: false }
   }
 
-  const curIdx = uniq.indexOf(cur.key)
-  const hasPrev = curIdx > 0
-  const hasNext = curIdx >= 0 && curIdx < uniq.length - 1
-
-  let prevName: string | undefined
-  if (hasPrev) {
-    const candidates = entries.filter((e) => e.key === uniq[curIdx - 1])
-    candidates.sort((a, b) => similarity(b.name, currentName) - similarity(a.name, currentName))
-    prevName = candidates[0]?.name
-  }
-
-  let nextName: string | undefined
-  if (hasNext) {
-    const candidates = entries.filter((e) => e.key === uniq[curIdx + 1])
-    candidates.sort((a, b) => similarity(b.name, currentName) - similarity(a.name, currentName))
-    nextName = candidates[0]?.name
-  }
+  const hasPrev = series.curIdx > 0
+  const hasNext = series.curIdx >= 0 && series.curIdx < series.uniq.length - 1
+  const prevName = hasPrev ? pickBestCandidate(series.entries, series.uniq[series.curIdx - 1], currentName)?.name : undefined
+  const nextName = hasNext ? pickBestCandidate(series.entries, series.uniq[series.curIdx + 1], currentName)?.name : undefined
 
   return {
     isEpisode: true,
-    label: cur.key !== undefined ? formatEpisodeLabel(cur.key) : undefined,
-    key: cur.key,
+    label: formatEpisodeLabel(series.cur.key),
+    key: series.cur.key,
     hasPrev,
     hasNext,
     prevName,
     nextName,
-    totalEpisodes: uniq.length,
+    totalEpisodes: series.uniq.length,
   }
 }
 

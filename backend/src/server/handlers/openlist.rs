@@ -10,6 +10,7 @@ use crate::server::AppState;
 use axum::{extract::State, response::Json};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tracing::info;
 
@@ -191,13 +192,27 @@ pub struct OpenListTestResponse {
     pub message: String,
 }
 
-/// 创建带局域网宽松策略的 HTTP 客户端
-fn make_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .danger_accept_invalid_certs(true) // 兼容 NAS / 局域网自签名证书
-        .timeout(Duration::from_secs(25))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+/// 复用带有局域网宽松 TLS 策略的 OpenList HTTP 客户端（避免每次请求重建连接池）
+fn openlist_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true) // 兼容 NAS / 局域网自签名证书
+            .timeout(Duration::from_secs(25))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+/// 复用 TMDB API 代理 HTTP 客户端
+fn tmdb_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
 }
 
 /// POST /openlist/test
@@ -232,7 +247,7 @@ pub async fn test_openlist_connection(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| saved.password.clone());
 
-    let client = make_http_client();
+    let client = openlist_http_client();
 
     if !username.is_empty() && !password.is_empty() {
         // 测试账号密码登录
@@ -312,43 +327,29 @@ fn resolve_account_mount(
     let mut base_url = cfg.base_url.clone();
     let mut root_path = "/".to_string();
 
-    // 1. 尝试按 uid 查映射
-    if let Some(uid_val) = uid {
-        let uid_str = uid_val.to_string();
-        if let Some(m) = cfg.accounts.get(&uid_str) {
-            mount_path = m.mount.clone();
-            if let Some(ref r) = m.root {
-                root_path = r.clone();
-            }
-            if let Some(ref b) = m.base {
-                base_url = b.trim_end_matches('/').to_string();
-            }
+    // 1. 优先按 uid 查映射，其次按用户名查映射
+    let mapping = uid
+        .and_then(|u| cfg.accounts.get(&u.to_string()))
+        .or_else(|| username.and_then(|u| cfg.accounts.get(u)));
+
+    if let Some(m) = mapping {
+        mount_path = m.mount.clone();
+        if let Some(ref r) = m.root {
+            root_path = r.clone();
+        }
+        if let Some(ref b) = m.base {
+            base_url = b.trim_end_matches('/').to_string();
         }
     }
 
-    // 2. 尝试按用户名查映射
-    if mount_path.is_empty() {
-        if let Some(u) = username {
-            if let Some(m) = cfg.accounts.get(u) {
-                mount_path = m.mount.clone();
-                if let Some(ref r) = m.root {
-                    root_path = r.clone();
-                }
-                if let Some(ref b) = m.base {
-                    base_url = b.trim_end_matches('/').to_string();
-                }
-            }
-        }
-    }
-
-    // 3. 尝试自动按 /{用户名} 推导
+    // 2. 尝试自动按 /{用户名} 推导
     if mount_path.is_empty() && cfg.auto_mount_by_username {
         if let Some(u) = username {
             mount_path = format!("/{}", u.trim_matches('/'));
         }
     }
 
-    // 4. 尝试兜底挂载路径
+    // 3. 尝试兜底挂载路径
     if mount_path.is_empty() && !cfg.fallback_mount.is_empty() {
         mount_path = cfg.fallback_mount.clone();
     }
@@ -382,7 +383,11 @@ fn to_openlist_path(mount_path: &str, root_path: &str, full_path: &str) -> Resul
 
     let mount_clean = mount_path.trim().trim_end_matches('/');
     if rel_path.is_empty() {
-        Ok(mount_clean.to_string())
+        Ok(if mount_clean.is_empty() {
+            "/".to_string()
+        } else {
+            mount_clean.to_string()
+        })
     } else {
         Ok(format!("{}/{}", mount_clean, rel_path))
     }
@@ -587,7 +592,7 @@ pub async fn refresh_openlist_dir(
         base_url, target_path
     );
 
-    let client = make_http_client();
+    let client = openlist_http_client();
     let token = login_and_get_token(&client, &base_url, &cfg.username, &cfg.password).await?;
 
     let list_url = format!("{}/api/fs/list", base_url);
@@ -701,7 +706,7 @@ pub async fn execute_openlist_op(
     let (base_url, mount_path, root_path) =
         resolve_account_mount(&cfg, req.uid, req.username.as_deref())?;
 
-    let client = make_http_client();
+    let client = openlist_http_client();
     let mut token = login_and_get_token(&client, &base_url, &cfg.username, &cfg.password).await?;
 
     let task_id = rand::random::<u32>() as u64;
@@ -952,16 +957,21 @@ pub async fn openlist_fs_call(
         ));
     }
 
-    if !req.uri.starts_with("/api/fs/") && !req.uri.starts_with("/api/public/") {
-        return Err(ApiError::BadRequest("仅支持调用 /api/fs/* 接口".to_string()));
+    if (!req.uri.starts_with("/api/fs/") && !req.uri.starts_with("/api/public/"))
+        || req.uri.contains("..")
+        || req.uri.contains("://")
+    {
+        return Err(ApiError::BadRequest(
+            "仅支持合法的 /api/fs/* 或 /api/public/* 接口路径".to_string(),
+        ));
     }
 
     let base_url = cfg.base_url.trim().trim_end_matches('/').to_string();
-    let client = make_http_client();
-    let mut token = login_and_get_token(&client, &base_url, &cfg.username, &cfg.password).await?;
+    let client = openlist_http_client();
+    let mut token = login_and_get_token(client, &base_url, &cfg.username, &cfg.password).await?;
 
     let res = call_openlist_api(
-        &client,
+        client,
         &base_url,
         &req.uri,
         &mut token,
@@ -988,28 +998,29 @@ pub async fn openlist_tmdb_proxy(
     State(_): State<AppState>,
     Json(req): Json<TmdbProxyRequest>,
 ) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
-    if !req.url.starts_with("https://api.themoviedb.org/") {
+    if !req.url.starts_with("https://api.themoviedb.org/") || req.url.contains("..") {
         return Err(ApiError::BadRequest("仅允许代理 api.themoviedb.org 请求".to_string()));
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("创建 HTTP 客户端失败: {}", e)))?;
+    let client = tmdb_http_client();
 
-    let mut request = client.get(&req.url);
+    let mut target_url = req.url.clone();
+    let mut bearer_token: Option<String> = None;
     if let Some(token) = req.token {
         if !token.is_empty() {
             if token.len() > 50 {
-                request = request.header("Authorization", format!("Bearer {}", token));
+                bearer_token = Some(token);
             } else if !req.url.contains("api_key=") {
                 let sep = if req.url.contains('?') { '&' } else { '?' };
-                let full_url = format!("{}{}{}api_key={}", req.url, sep, "", token);
-                request = client.get(&full_url);
+                target_url = format!("{}{}api_key={}", req.url, sep, token);
             }
         }
     }
-    request = request.header("Accept", "application/json");
+
+    let mut request = client.get(&target_url).header("Accept", "application/json");
+    if let Some(bearer) = bearer_token {
+        request = request.header("Authorization", format!("Bearer {}", bearer));
+    }
 
     let resp = request
         .send()
@@ -1023,4 +1034,73 @@ pub async fn openlist_tmdb_proxy(
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("解析 TMDB 响应失败 (HTTP {}): {}", status, e)))?;
 
     Ok(Json(ApiResponse::success(json)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_parent_and_name() {
+        assert_eq!(
+            split_parent_and_name("/电影/a.mkv"),
+            ("/电影".to_string(), "a.mkv".to_string())
+        );
+        assert_eq!(
+            split_parent_and_name("/a.mkv"),
+            ("/".to_string(), "a.mkv".to_string())
+        );
+        assert_eq!(
+            split_parent_and_name("/电影/"),
+            ("/".to_string(), "电影".to_string())
+        );
+    }
+
+    #[test]
+    fn test_to_openlist_path() {
+        assert_eq!(
+            to_openlist_path("/HKU慕容", "/", "/电影/a.mkv").unwrap(),
+            "/HKU慕容/电影/a.mkv"
+        );
+        assert_eq!(
+            to_openlist_path("/", "/", "/").unwrap(),
+            "/"
+        );
+        assert_eq!(
+            to_openlist_path("/HKU慕容", "/电影", "/电影/a.mkv").unwrap(),
+            "/HKU慕容/a.mkv"
+        );
+        assert!(to_openlist_path("/HKU慕容", "/电影", "/音乐/b.mp3").is_err());
+    }
+
+    #[test]
+    fn test_resolve_account_mount() {
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "123".to_string(),
+            OpenListAccountMapping {
+                mount: "/custom".to_string(),
+                root: Some("/root".to_string()),
+                base: Some("https://sub.example.com/".to_string()),
+            },
+        );
+        let cfg = OpenListConfig {
+            enabled: true,
+            base_url: "https://openlist.example.com".to_string(),
+            accounts,
+            auto_mount_by_username: true,
+            fallback_mount: "/fallback".to_string(),
+            ..Default::default()
+        };
+
+        let (b, m, r) = resolve_account_mount(&cfg, Some(123), Some("alice")).unwrap();
+        assert_eq!(b, "https://sub.example.com");
+        assert_eq!(m, "/custom");
+        assert_eq!(r, "/root");
+
+        let (b2, m2, r2) = resolve_account_mount(&cfg, Some(999), Some("alice")).unwrap();
+        assert_eq!(b2, "https://openlist.example.com");
+        assert_eq!(m2, "/alice");
+        assert_eq!(r2, "/");
+    }
 }

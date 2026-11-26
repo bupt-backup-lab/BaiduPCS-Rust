@@ -105,6 +105,57 @@
             </el-col>
           </el-row>
 
+          <el-row :gutter="20">
+            <el-col :xs="24" :sm="12">
+              <el-form-item label="安卓端播放器包名 (Android Package)">
+                <el-select
+                  v-model="form.androidPackage"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="留空：弹出系统播放器选择列表"
+                  style="width: 100%"
+                >
+                  <el-option label="弹出系统应用选择列表（推荐）" value="" />
+                  <el-option label="VLC for Android (org.videolan.vlc)" value="org.videolan.vlc" />
+                  <el-option label="MPV for Android (is.xyz.mpv)" value="is.xyz.mpv" />
+                  <el-option label="MX Player 免费版 (com.mxtech.videoplayer.ad)" value="com.mxtech.videoplayer.ad" />
+                  <el-option label="MX Player 专业版 (com.mxtech.videoplayer.pro)" value="com.mxtech.videoplayer.pro" />
+                  <el-option label="Just Player (com.brouken.player)" value="com.brouken.player" />
+                  <el-option label="Nova Video Player (org.courville.nova)" value="org.courville.nova" />
+                  <el-option label="Kodi (org.xbmc.kodi)" value="org.xbmc.kodi" />
+                </el-select>
+                <div class="form-tip">
+                  留空时由 Android 弹出「打开方式」列表；填写包名（如 <code>org.videolan.vlc</code>）可直接静默唤起并支持外挂字幕。
+                </div>
+              </el-form-item>
+            </el-col>
+            <el-col :xs="24" :sm="12">
+              <el-form-item label="iOS 端播放器 Scheme">
+                <el-select
+                  v-model="form.iosScheme"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="留空：使用浏览器内置播放"
+                  style="width: 100%"
+                >
+                  <el-option label="浏览器内置原生播放（默认）" value="" />
+                  <el-option label="VLC for Mobile (vlc)" value="vlc" />
+                  <el-option label="Infuse (infuse)" value="infuse" />
+                  <el-option label="nPlayer (nplayer-https)" value="nplayer-https" />
+                  <el-option label="VidHub (vidhub)" value="vidhub" />
+                  <el-option label="Fileball (fileball)" value="fileball" />
+                </el-select>
+                <div class="form-tip">
+                  留空时使用 Safari/浏览器直接播放；选择或输入 Scheme（如 <code>vlc</code> / <code>infuse</code>）可直接唤起 App。
+                </div>
+              </el-form-item>
+            </el-col>
+          </el-row>
+
           <el-form-item label="文件操作接管模式">
             <el-radio-group v-model="form.takeoverMode">
               <el-radio-button label="off">关闭</el-radio-button>
@@ -212,6 +263,8 @@ const form = ref<OpenListConfig>({
   password: '',
   hasPassword: false,
   desktopScheme: 'mpvpcs',
+  androidPackage: '',
+  iosScheme: '',
   autoMountByUsername: true,
   fallbackMount: '',
   takeoverMode: 'observe',
@@ -298,6 +351,8 @@ async function handleSave() {
       username: form.value.username.trim(),
       password: form.value.password,
       desktopScheme: form.value.desktopScheme.trim() || 'mpvpcs',
+      androidPackage: (form.value.androidPackage || '').trim(),
+      iosScheme: (form.value.iosScheme || '').trim(),
     })
     ElMessage.success('OpenList 联动配置已保存至 app.toml')
   } catch (e: any) {
