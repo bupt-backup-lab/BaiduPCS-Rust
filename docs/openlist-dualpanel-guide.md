@@ -32,6 +32,8 @@
 | 前端工具 | `frontend/src/utils/openlist.ts` | 账号挂载点解析、OpenList 直链/目录链接生成、多端播放器唤起（`launchMpv`）、Jellyfin 同名字幕匹配（`findMatchingSubtitles`）、剧集智能识别与上下集推导（`findNeighborEpisode` / `getEpisodeInfo`）。 |
 | 前端接管 | `frontend/src/utils/openlistTakeover.ts` | 统一拦截网盘原生写操作（`handleTakeoverOperation`），按 `off` / `observe` / `on` 模式分流并处理失败回退确认。 |
 | 前端组件 | `frontend/src/components/EpisodePlayerBar.vue` | 右下角悬浮剧集连播控制栏（支持上一集、下一集、复制直链、重播、关闭）。 |
+| 前端组件 | `frontend/src/components/FileTypeIcon.vue` | 多类型彩色扁平 SVG 文件图标组件（区分文件夹、视频、音频、图片、压缩包、字幕、文档、代码、安装包、种子、电子书等）。 |
+| 前端工具 | `frontend/src/utils/fileIcon.ts` | 文件扩展名与类型分类识别工具（`getFileCategory`）。 |
 | 前端组件 | `frontend/src/components/OpenListDualPaneModal.vue` | OpenList 双栏文件管理弹窗，包含双栏浏览、筛选、批量重命名、智能影视重命名与 TMDB 智能刮削子面板。 |
 | 前端设置 | `frontend/src/components/settings/OpenListSettingsSection.vue` | 系统设置页中的「OpenList 联动设置」表单（基础地址、专用账号、桌面/Android/iOS 播放器参数、接管模式、账号挂载点映射表）。 |
 | 工作流 | `.github/workflows/build-frontend.yml` | 前端独立快速构建与产物打包工作流（`frontend-dist.zip`）。 |
@@ -50,7 +52,7 @@
 | 修改 | `frontend/src/api/config.ts` | 新增 `getOpenListConfig`、`updateOpenListConfig`、`testOpenListBackend`、`refreshOpenListBackend`、`executeOpenListOpBackend`、`callOpenListFsBackend`、`proxyTmdbBackend` API 封装。 |
 | 修改 | `frontend/src/api/file.ts` | 将 `createFolder`、`deleteFiles`、`copyFiles`、`moveFiles`、`renameFile` 接入 `handleTakeoverOperation` 接管拦截层。 |
 | 修改 | `frontend/src/layouts/MainLayout.vue` | 在顶栏右侧增加 `OL·关闭` / `OL·观察` / `OL·接管` 快捷状态胶囊，点击可循环切换模式。 |
-| 修改 | `frontend/src/views/FilesView.vue` | 工具栏新增「跳转OL」「刷新OL」「双栏管理」按钮；右键菜单新增「MPV 播放」「浏览器打开」「复制 OpenList 链接」；挂载 `EpisodePlayerBar` 与 `OpenListDualPaneModal`；优化移动端工具栏与卡片间距。 |
+| 修改 | `frontend/src/views/FilesView.vue` | 工具栏新增「跳转OL」「刷新OL」「双栏管理」按钮；右键菜单新增「MPV 播放」「浏览器打开」「复制 OpenList 链接」；挂载 `EpisodePlayerBar` 与 `OpenListDualPaneModal`；接入 `FileTypeIcon` 多类型彩色图标并修复 `<el-table>` 残留灰行悬浮问题；优化移动端工具栏与卡片间距。 |
 | 修改 | `frontend/src/views/SettingsView.vue` | 引入 `OpenListSettingsSection` 并在左侧设置导航增加「OpenList 联动」锚点。 |
 | 修改 | `.github/workflows/release-binaries.yml` | 改用纯二进制 + 前端静态资源打包，新增 `windows-arm64`（`aarch64-pc-windows-msvc`）目标，使用 `cargo-zigbuild` 编译 Linux musl 目标。 |
 | 删除 | `Dockerfile`、`docker-compose*.yml`、`.github/workflows/docker-publish.yml`、`.github/workflows/release-docker-arm64.yml` | 移除分支不再使用的 Docker 构建与发布配置。 |

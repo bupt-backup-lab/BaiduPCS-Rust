@@ -259,6 +259,7 @@
           ref="fileTableRef"
           v-loading="loading"
           :data="fileList"
+          row-key="fs_id"
           style="width: 100%"
           @row-click="handleRowClick"
           @row-contextmenu="handleRowContextMenu"
@@ -271,10 +272,7 @@
         <el-table-column label="文件名" min-width="400" prop="server_filename" sortable="custom">
           <template #default="{ row }">
             <div class="file-name" :title="(row.is_encrypted || row.is_encrypted_folder) ? `加密${row.isdir === 1 ? '文件夹' : '文件'}: ${row.server_filename}` : ''">
-              <el-icon :size="20" class="file-icon">
-                <Folder v-if="row.isdir === 1"/>
-                <Document v-else/>
-              </el-icon>
+              <FileTypeIcon :name="getDisplayName(row)" :is-dir="row.isdir === 1" :size="20" class="file-icon" />
               <span>{{ getDisplayName(row) }}</span>
               <el-tag v-if="row.is_encrypted || row.is_encrypted_folder" type="warning" size="small" class="encrypted-tag">
                 加密
@@ -358,10 +356,7 @@
               @change="() => toggleMobileSelect(item)"
           />
           <div class="file-card-main">
-            <el-icon :size="36" class="file-card-icon" :color="item.isdir === 1 ? '#e6a23c' : '#409eff'">
-              <Folder v-if="item.isdir === 1"/>
-              <Document v-else/>
-            </el-icon>
+            <FileTypeIcon :name="getDisplayName(item)" :is-dir="item.isdir === 1" :size="36" class="file-card-icon" />
             <div class="file-card-info">
               <div class="file-card-name" :title="(item.is_encrypted || item.is_encrypted_folder) ? `加密${item.isdir === 1 ? '文件夹' : '文件'}: ${item.server_filename}` : ''">
                 {{ getDisplayName(item) }}
@@ -657,6 +652,7 @@ import {ElMessage, ElMessageBox} from 'element-plus'
 import type {InputInstance, TableInstance} from 'element-plus'
 import EpisodePlayerBar from '@/components/EpisodePlayerBar.vue'
 import OpenListDualPaneModal from '@/components/OpenListDualPaneModal.vue'
+import FileTypeIcon from '@/components/FileTypeIcon.vue'
 import {
   getFileList,
   searchFiles,
@@ -1026,6 +1022,7 @@ function getRowClassName({row}: { row: FileItem }) {
   const classes: string[] = []
   if (row.isdir === 1) classes.push('directory-row')
   if (locatedPath.value !== null && row.path === locatedPath.value) classes.push('row-located')
+  if (selectedFiles.value.some((f) => f.fs_id === row.fs_id)) classes.push('is-selected')
   return classes.join(' ')
 }
 
@@ -2632,7 +2629,7 @@ void joinPath
 
 <script lang="ts">
 // 图标导入
-export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Download, Share, Loading, Link, Delete, Search, Close, CopyDocument, Rank, Switch, Edit, MoreFilled, Operation, TopRight, RefreshRight, Grid} from '@element-plus/icons-vue'
+export {Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Download, Share, Loading, Link, Delete, Search, Close, CopyDocument, Rank, Switch, Edit, MoreFilled, Operation, TopRight, RefreshRight, Grid} from '@element-plus/icons-vue'
 </script>
 
 <style scoped lang="scss">
@@ -2912,12 +2909,17 @@ export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Dow
   }
 }
 
+// 屏蔽 Element Plus JS 残留的 .hover-row 灰底，仅由纯 CSS :hover 控制行悬浮高亮
+:deep(.el-table__body tr.hover-row:not(:hover) > td.el-table__cell) {
+  background-color: var(--el-table-tr-bg-color);
+}
+
 :deep(.directory-row) {
   cursor: pointer;
+}
 
-  &:hover {
-    background-color: #f5f7fa;
-  }
+:deep(.el-table__body tr.el-table__row.is-selected > td.el-table__cell) {
+  background-color: #ecf5ff;
 }
 
 // 「定位到网盘」目标行：常亮浅底色 + 进入时闪烁两次
@@ -2930,6 +2932,14 @@ export {Folder, Document, Refresh, HomeFilled, Upload, ArrowDown, FolderAdd, Dow
 .mobile-file-card.row-located {
   background-color: #ecf5ff;
   animation: row-located-flash 1.6s ease-in-out;
+}
+
+:deep(.el-table__body tr.el-table__row:hover > td.el-table__cell) {
+  background-color: #f5f7fa;
+}
+
+:deep(.el-table__body tr.el-table__row.is-selected:hover > td.el-table__cell) {
+  background-color: #e2effd;
 }
 
 :deep(.el-table__row) {

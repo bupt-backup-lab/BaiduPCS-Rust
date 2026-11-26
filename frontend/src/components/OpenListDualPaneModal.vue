@@ -64,7 +64,10 @@
                   v-for="item in visibleItems('left')"
                   :key="item.name"
                   class="omni-item data-row"
-                  :class="{ 'omni-item-active': ctxMenu.visible && ctxMenu.side === 'left' && ctxMenu.item?.name === item.name }"
+                  :class="{
+                    'omni-item-selected': isItemSelected('left', item.name),
+                    'omni-item-active': ctxMenu.visible && ctxMenu.side === 'left' && ctxMenu.item?.name === item.name,
+                  }"
                   @click="handleItemClick('left', item)"
                   @contextmenu.prevent="openContextMenu('left', item, $event)"
                 >
@@ -75,7 +78,8 @@
                     @click.stop="toggleItemSelect('left', item.name)"
                   />
                   <span class="omni-item-title">
-                    {{ item.is_dir ? '📁 ' : '📄 ' }}{{ item.name }}
+                    <FileTypeIcon :name="item.name" :is-dir="item.is_dir" :size="18" class="omni-item-icon" />
+                    <span class="omni-item-name">{{ item.name }}</span>
                   </span>
                   <span class="omni-more" @click.stop="openContextMenuMobile('left', item)">⋯</span>
                 </div>
@@ -165,7 +169,10 @@
                   v-for="item in visibleItems('right')"
                   :key="item.name"
                   class="omni-item data-row"
-                  :class="{ 'omni-item-active': ctxMenu.visible && ctxMenu.side === 'right' && ctxMenu.item?.name === item.name }"
+                  :class="{
+                    'omni-item-selected': isItemSelected('right', item.name),
+                    'omni-item-active': ctxMenu.visible && ctxMenu.side === 'right' && ctxMenu.item?.name === item.name,
+                  }"
                   @click="handleItemClick('right', item)"
                   @contextmenu.prevent="openContextMenu('right', item, $event)"
                 >
@@ -176,7 +183,8 @@
                     @click.stop="toggleItemSelect('right', item.name)"
                   />
                   <span class="omni-item-title">
-                    {{ item.is_dir ? '📁 ' : '📄 ' }}{{ item.name }}
+                    <FileTypeIcon :name="item.name" :is-dir="item.is_dir" :size="18" class="omni-item-icon" />
+                    <span class="omni-item-name">{{ item.name }}</span>
                   </span>
                   <span class="omni-more" @click.stop="openContextMenuMobile('right', item)">⋯</span>
                 </div>
@@ -267,7 +275,7 @@
         >
           <div class="omni-ctx-header">
             <div class="omni-ctx-info">
-              <span>{{ ctxMenu.item?.is_dir ? '📁' : '📄' }}</span>
+              <FileTypeIcon v-if="ctxMenu.item" :name="ctxMenu.item.name" :is-dir="ctxMenu.item.is_dir" :size="18" />
               <span class="omni-ctx-name">{{ ctxMenu.item?.name }}</span>
             </div>
             <button class="omni-ctx-close" @click="closeContextMenu">✕</button>
@@ -750,6 +758,7 @@ import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } 
 import { ElMessage } from 'element-plus'
 import { callOpenListFsBackend, proxyTmdbBackend } from '@/api/config'
 import EpisodePlayerBar from '@/components/EpisodePlayerBar.vue'
+import FileTypeIcon from '@/components/FileTypeIcon.vue'
 import { useOpenListStore } from '@/stores/openlist'
 import {
   launchMpv,
@@ -2333,16 +2342,26 @@ onBeforeUnmount(() => {
 .omni-item {
   padding: 10px 12px;
   border-bottom: 1px solid #f1f5f9;
+  background: #ffffff;
   display: flex;
   align-items: center;
   cursor: pointer;
   font-size: 14px;
   user-select: none;
   color: #334155;
-  transition: background 0.15s;
+  transition: background 0.15s, color 0.15s;
+}
+.omni-item.omni-item-selected {
+  background: #ecf5ff;
 }
 .omni-item:hover {
-  background: #f0f5ff;
+  background: #f5f7fa;
+}
+.omni-item.omni-item-selected:hover {
+  background: #e2effd;
+}
+.omni-item:hover .omni-item-name {
+  color: #409eff;
 }
 .omni-item.omni-item-active {
   background: #e6f4ff !important;
@@ -2351,10 +2370,19 @@ onBeforeUnmount(() => {
 
 .omni-item-title {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 8px;
+}
+
+.omni-item-name {
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-right: 8px;
+  transition: color 0.15s;
 }
 
 .omni-cb {
