@@ -159,10 +159,8 @@ function handleSelectPackage(pkg: string) {
   if (shouldSaveDefault) {
     void openListStore
       .saveConfig({ androidPackage: trimmedPkg })
-      .then((ok) => {
-        if (ok) {
-          ElMessage.success(`已将默认安卓播放器保存为 ${trimmedPkg}`)
-        }
+      .then(() => {
+        ElMessage.success(`已将默认安卓播放器保存为 ${trimmedPkg}`)
       })
       .catch(() => {
         ElMessage.warning('保存默认播放器失败，可在设置页手动配置')
