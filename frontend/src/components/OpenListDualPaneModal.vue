@@ -43,7 +43,7 @@
             <div v-if="panes.left.spaceInfo || panes.left.spaceLoading" class="omni-space-bar">
               <div class="omni-space-meta">
                 <span class="omni-space-driver">
-                  💾 {{ panes.left.spaceLoading && !panes.left.spaceInfo ? '存储检测中' : (panes.left.spaceInfo?.driver || 'OpenList 根目录') }}
+                  💾 {{ panes.left.spaceLoading && !panes.left.spaceInfo ? '存储检测中' : formatDriverLabel(panes.left.spaceInfo?.driver) }}
                   <template v-if="panes.left.spaceInfo?.mountPath"> · {{ panes.left.spaceInfo.mountPath }}</template>
                 </span>
                 <span v-if="panes.left.spaceInfo?.supported && panes.left.spaceInfo.totalSpace" class="omni-space-text">
@@ -126,6 +126,21 @@
                   <label><input v-model="panes.left.filterMode" type="radio" value="keyword" /> 关键字</label>
                   <label><input v-model="panes.left.filterMode" type="radio" value="number" /> 选前N个</label>
                 </div>
+                <div class="omni-sort-group">
+                  <select v-model="panes.left.sortBy" class="omni-sort-select" title="排序字段" @change="handleSortChange('left')">
+                    <option value="name">名称</option>
+                    <option value="time">时间</option>
+                    <option value="size">大小</option>
+                  </select>
+                  <button
+                    type="button"
+                    class="omni-sort-dir-btn"
+                    :title="panes.left.sortOrder === 'asc' ? '当前升序，点击切换降序' : '当前降序，点击切换升序'"
+                    @click="toggleSortOrder('left')"
+                  >
+                    {{ panes.left.sortOrder === 'asc' ? '↑' : '↓' }}
+                  </button>
+                </div>
               </div>
 
               <div class="omni-tag-row">
@@ -173,7 +188,7 @@
             <div v-if="panes.right.spaceInfo || panes.right.spaceLoading" class="omni-space-bar">
               <div class="omni-space-meta">
                 <span class="omni-space-driver">
-                  💾 {{ panes.right.spaceLoading && !panes.right.spaceInfo ? '存储检测中' : (panes.right.spaceInfo?.driver || 'OpenList 根目录') }}
+                  💾 {{ panes.right.spaceLoading && !panes.right.spaceInfo ? '存储检测中' : formatDriverLabel(panes.right.spaceInfo?.driver) }}
                   <template v-if="panes.right.spaceInfo?.mountPath"> · {{ panes.right.spaceInfo.mountPath }}</template>
                 </span>
                 <span v-if="panes.right.spaceInfo?.supported && panes.right.spaceInfo.totalSpace" class="omni-space-text">
@@ -255,6 +270,21 @@
                   <label><input v-model="panes.right.filterMode" type="radio" value="regex" /> 正则</label>
                   <label><input v-model="panes.right.filterMode" type="radio" value="keyword" /> 关键字</label>
                   <label><input v-model="panes.right.filterMode" type="radio" value="number" /> 选前N个</label>
+                </div>
+                <div class="omni-sort-group">
+                  <select v-model="panes.right.sortBy" class="omni-sort-select" title="排序字段" @change="handleSortChange('right')">
+                    <option value="name">名称</option>
+                    <option value="time">时间</option>
+                    <option value="size">大小</option>
+                  </select>
+                  <button
+                    type="button"
+                    class="omni-sort-dir-btn"
+                    :title="panes.right.sortOrder === 'asc' ? '当前升序，点击切换降序' : '当前降序，点击切换升序'"
+                    @click="toggleSortOrder('right')"
+                  >
+                    {{ panes.right.sortOrder === 'asc' ? '↑' : '↓' }}
+                  </button>
                 </div>
               </div>
 
@@ -932,12 +962,57 @@ interface OpenListItem {
   type?: number
 }
 
+type DualSortBy = 'name' | 'time' | 'size'
+type DualSortOrder = 'asc' | 'desc'
+
+interface PaneSortPref {
+  sortBy: DualSortBy
+  sortOrder: DualSortOrder
+}
+
+const STORAGE_KEY_SORT_PREFS = 'pcs_dual_sort_prefs'
+
+function loadSortPrefs(): { left: PaneSortPref; right: PaneSortPref } {
+  const def: PaneSortPref = { sortBy: 'name', sortOrder: 'asc' }
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_SORT_PREFS)
+    if (!raw) return { left: { ...def }, right: { ...def } }
+    const parsed = JSON.parse(raw)
+    const sanitize = (p: any): PaneSortPref => ({
+      sortBy: p?.sortBy === 'time' || p?.sortBy === 'size' ? p.sortBy : 'name',
+      sortOrder: p?.sortOrder === 'desc' ? 'desc' : 'asc',
+    })
+    return {
+      left: sanitize(parsed.left),
+      right: sanitize(parsed.right),
+    }
+  } catch {
+    return { left: { ...def }, right: { ...def } }
+  }
+}
+
+function saveSortPrefs() {
+  try {
+    localStorage.setItem(
+      STORAGE_KEY_SORT_PREFS,
+      JSON.stringify({
+        left: { sortBy: panes.left.sortBy, sortOrder: panes.left.sortOrder },
+        right: { sortBy: panes.right.sortBy, sortOrder: panes.right.sortOrder },
+      })
+    )
+  } catch {}
+}
+
+const initialSortPrefs = loadSortPrefs()
+
 interface PaneState {
   path: string
   items: OpenListItem[]
   selectedNames: Set<string>
   filterText: string
   filterMode: 'regex' | 'keyword' | 'number'
+  sortBy: DualSortBy
+  sortOrder: DualSortOrder
   loading: boolean
   error: string | null
   spaceInfo: OpenListSpaceInfo | null
@@ -970,6 +1045,8 @@ const panes = reactive<{ left: PaneState; right: PaneState }>({
     selectedNames: new Set(),
     filterText: '',
     filterMode: 'regex',
+    sortBy: initialSortPrefs.left.sortBy,
+    sortOrder: initialSortPrefs.left.sortOrder,
     loading: false,
     error: null,
     spaceInfo: null,
@@ -981,6 +1058,8 @@ const panes = reactive<{ left: PaneState; right: PaneState }>({
     selectedNames: new Set(),
     filterText: '',
     filterMode: 'regex',
+    sortBy: initialSortPrefs.right.sortBy,
+    sortOrder: initialSortPrefs.right.sortOrder,
     loading: false,
     error: null,
     spaceInfo: null,
@@ -1048,15 +1127,54 @@ function formatSpaceSummary(info: OpenListSpaceInfo): string {
   return `已用 ${used != null ? formatSpaceBytes(used) : '-'} / 总共 ${formatSpaceBytes(info.totalSpace)}${freePart}`
 }
 
+const DRIVER_LABELS: Record<string, string> = {
+  baidunetdisk: '百度网盘',
+  baidu_netdisk: '百度网盘',
+  baiduphoto: '一刻相册',
+  aliyundrive: '阿里云盘',
+  aliyundriveopen: '阿里云盘',
+  aliyundriveshare: '阿里云盘分享',
+  quark: '夸克网盘',
+  quarktv: '夸克网盘',
+  '115 cloud': '115 网盘',
+  '115 share': '115 分享',
+  '115': '115 网盘',
+  pikpak: 'PikPak',
+  local: '本地存储',
+  webdav: 'WebDAV',
+  onedrive: 'OneDrive',
+  googledrive: 'Google Drive',
+  '123pan': '123 云盘',
+  '123panlink': '123 云盘',
+  s3: 'S3 对象存储',
+  ftp: 'FTP',
+  sftp: 'SFTP',
+  smb: 'SMB',
+}
+
+function normalizeDriverName(d?: string | null): string {
+  const s = (d || '').trim()
+  if (!s || s.toLowerCase() === 'unknown') return ''
+  return s
+}
+
+function formatDriverLabel(d?: string | null): string {
+  const clean = normalizeDriverName(d)
+  if (!clean) return '挂载存储'
+  return DRIVER_LABELS[clean.toLowerCase()] || clean
+}
+
 async function refreshPaneSpace(
   side: 'left' | 'right',
   path: string,
   forceRefresh: boolean,
   listData?: any
 ) {
-  const provider = typeof listData?.provider === 'string' ? listData.provider : ''
+  const provider = normalizeDriverName(typeof listData?.provider === 'string' ? listData.provider : '')
   const md = listData?.mount_details
-  if (md && typeof md.total_space === 'number' && md.total_space > 0) {
+  const mdDriver = normalizeDriverName(md?.driver_name)
+  const directDriver = provider || mdDriver
+  if (md && typeof md.total_space === 'number' && md.total_space > 0 && directDriver) {
     const total = md.total_space
     const free = typeof md.free_space === 'number' && md.free_space >= 0 ? md.free_space : null
     const used =
@@ -1067,7 +1185,7 @@ async function refreshPaneSpace(
         : null
     const directInfo: OpenListSpaceInfo = {
       supported: true,
-      driver: md.driver_name || provider || 'OpenList',
+      driver: directDriver,
       mountPath: normalizeMount(path),
       totalSpace: total,
       usedSpace: used,
@@ -1084,7 +1202,7 @@ async function refreshPaneSpace(
   const norm = normalizeMount(path)
   if (!forceRefresh) {
     const cached = findCachedSpace(norm, provider || undefined)
-    if (cached) {
+    if (cached && normalizeDriverName(cached.driver)) {
       panes[side].spaceInfo = cached
       return
     }
@@ -1100,13 +1218,15 @@ async function refreshPaneSpace(
       spacePending.set(norm, reqPromise)
     }
     const info = await reqPromise
-    if (!info.driver && provider) {
-      info.driver = provider
+    const cleanDriver = normalizeDriverName(info.driver) || provider
+    const normalizedInfo: OpenListSpaceInfo = {
+      ...info,
+      driver: cleanDriver,
     }
-    const cacheKey = normalizeMount(info.mountPath || norm)
-    spaceCache[cacheKey] = info
+    const cacheKey = normalizeMount(normalizedInfo.mountPath || norm)
+    spaceCache[cacheKey] = normalizedInfo
     if (normalizeMount(panes[side].path) === norm) {
-      panes[side].spaceInfo = info
+      panes[side].spaceInfo = normalizedInfo
     }
   } catch {
     if (normalizeMount(panes[side].path) === norm && provider) {
@@ -1192,6 +1312,33 @@ function getFilterPlaceholder(mode: 'regex' | 'keyword' | 'number') {
   return mode === 'regex' ? '正则筛选 (回车)' : mode === 'keyword' ? '关键字筛选 (回车)' : '输入数字选前N个 (回车)'
 }
 
+function sortItemsList(items: OpenListItem[], sortBy: DualSortBy, sortOrder: DualSortOrder): OpenListItem[] {
+  const dir = sortOrder === 'asc' ? 1 : -1
+  return [...items].sort((a, b) => {
+    if (a.is_dir !== b.is_dir) return b.is_dir ? 1 : -1
+    if (sortBy === 'time') {
+      const ta = Date.parse(a.modified || '') || 0
+      const tb = Date.parse(b.modified || '') || 0
+      if (ta !== tb) return (ta - tb) * dir
+    } else if (sortBy === 'size') {
+      const sa = a.size || 0
+      const sb = b.size || 0
+      if (sa !== sb) return (sa - sb) * dir
+    }
+    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }) * dir
+  })
+}
+
+function handleSortChange(side: 'left' | 'right') {
+  panes[side].items = sortItemsList(panes[side].items, panes[side].sortBy, panes[side].sortOrder)
+  saveSortPrefs()
+}
+
+function toggleSortOrder(side: 'left' | 'right') {
+  panes[side].sortOrder = panes[side].sortOrder === 'asc' ? 'desc' : 'asc'
+  handleSortChange(side)
+}
+
 async function renderPane(side: 'left' | 'right', forceRefresh = false) {
   const targetPath = panes[side].path
   panes[side].loading = true
@@ -1219,15 +1366,7 @@ async function renderPane(side: 'left' | 'right', forceRefresh = false) {
     } else if (Array.isArray(res?.data)) {
       rawList = res.data
     }
-    const list: OpenListItem[] = [...rawList]
-    list.sort((a, b) =>
-      a.is_dir !== b.is_dir
-        ? b.is_dir
-          ? 1
-          : -1
-        : a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
-    )
-    panes[side].items = list
+    panes[side].items = sortItemsList(rawList, panes[side].sortBy, panes[side].sortOrder)
     void refreshPaneSpace(side, targetPath, forceRefresh, res?.data)
   } catch (err: any) {
     panes[side].error = err.message || '加载目录失败'
@@ -2660,6 +2799,7 @@ onBeforeUnmount(() => {
 
 .omni-filter-row {
   display: flex;
+  flex-wrap: wrap;
   width: 100%;
   gap: 8px;
   align-items: center;
@@ -2671,8 +2811,9 @@ onBeforeUnmount(() => {
   border-radius: 4px;
   font-size: 12px;
   outline: none;
-  width: 160px;
-  flex-shrink: 0;
+  width: 140px;
+  flex: 1 1 120px;
+  min-width: 100px;
   background: #fff;
   color: #333;
 }
@@ -2696,6 +2837,42 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 3px;
+}
+
+.omni-sort-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.omni-sort-select {
+  padding: 3px 6px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #fff;
+  color: #475569;
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+}
+
+.omni-sort-dir-btn {
+  padding: 3px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  line-height: 1.2;
+}
+.omni-sort-dir-btn:hover {
+  border-color: #1890ff;
+  color: #1890ff;
+  background: #e6f7ff;
 }
 
 .omni-tag-row {

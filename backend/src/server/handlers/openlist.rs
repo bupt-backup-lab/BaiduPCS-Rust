@@ -1143,15 +1143,30 @@ fn non_negative_u64(val: Option<&serde_json::Value>) -> Option<u64> {
     val.and_then(|v| v.as_i64()).filter(|&n| n >= 0).map(|n| n as u64)
 }
 
+fn is_valid_driver_name(s: &str) -> bool {
+    let trimmed = s.trim();
+    !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("unknown")
+}
+
+fn pick_driver_name(candidates: &[Option<&serde_json::Value>]) -> String {
+    for c in candidates {
+        if let Some(s) = c.and_then(|v| v.as_str()) {
+            let trimmed = s.trim();
+            if is_valid_driver_name(trimmed) {
+                return trimmed.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
 fn extract_space_fields(val: &serde_json::Value) -> (String, Option<u64>, Option<u64>, Option<u64>) {
     let md = val.get("mount_details").unwrap_or(val);
-    let driver = md
-        .get("driver_name")
-        .or_else(|| val.get("driver"))
-        .or_else(|| val.get("provider"))
-        .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
+    let driver = pick_driver_name(&[
+        val.get("driver"),
+        val.get("provider"),
+        md.get("driver_name"),
+    ]);
 
     let total = positive_u64(md.get("total_space"));
     let free = non_negative_u64(md.get("free_space"));
@@ -1256,8 +1271,8 @@ pub async fn get_openlist_space(
         }
     }
 
-    // 2. 若 /api/fs/list 未带出容量，再尝试 /api/fs/get
-    if !result.supported {
+    // 2. 若 /api/fs/list 未带出容量或驱动名，再尝试 /api/fs/get
+    if !result.supported || result.driver.is_empty() {
         if let Ok(get_res) = call_openlist_api(
             client,
             &base_url,
@@ -1397,7 +1412,7 @@ mod tests {
         let v = serde_json::json!({
             "provider": "BaiduNetdisk",
             "mount_details": {
-                "driver_name": "BaiduNetdisk",
+                "driver_name": "unknown",
                 "total_space": 5_000_000_000_000i64,
                 "free_space": 1_800_000_000_000i64
             }
