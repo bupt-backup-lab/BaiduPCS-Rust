@@ -39,28 +39,45 @@
               </div>
             </div>
 
-            <!-- 当前面板挂载存储容量信息 -->
-            <div v-if="panes.left.spaceInfo || panes.left.spaceLoading" class="omni-space-bar">
-              <div class="omni-space-meta">
-                <span class="omni-space-driver">
-                  💾 {{ panes.left.spaceLoading && !panes.left.spaceInfo ? '存储检测中' : formatDriverLabel(panes.left.spaceInfo?.driver) }}
-                  <template v-if="panes.left.spaceInfo?.mountPath"> · {{ panes.left.spaceInfo.mountPath }}</template>
-                </span>
-                <span v-if="panes.left.spaceInfo?.supported && panes.left.spaceInfo.totalSpace" class="omni-space-text">
-                  {{ formatSpaceSummary(panes.left.spaceInfo) }}
-                </span>
-                <span v-else-if="!panes.left.spaceLoading" class="omni-space-text omni-space-muted">
-                  未提供容量统计
-                </span>
+            <!-- 当前面板挂载存储容量信息 + 排序控件同一行 -->
+            <div class="omni-space-sort-row">
+              <div v-if="panes.left.spaceInfo || panes.left.spaceLoading" class="omni-space-bar">
+                <div class="omni-space-meta">
+                  <span class="omni-space-driver">
+                    💾 {{ panes.left.spaceLoading && !panes.left.spaceInfo ? '存储检测中' : formatDriverLabel(panes.left.spaceInfo?.driver) }}
+                    <template v-if="panes.left.spaceInfo?.mountPath"> · {{ panes.left.spaceInfo.mountPath }}</template>
+                  </span>
+                  <span v-if="panes.left.spaceInfo?.supported && panes.left.spaceInfo.totalSpace" class="omni-space-text">
+                    {{ formatSpaceSummary(panes.left.spaceInfo) }}
+                  </span>
+                  <span v-else-if="!panes.left.spaceLoading" class="omni-space-text omni-space-muted">
+                    未提供容量统计
+                  </span>
+                </div>
+                <div v-if="panes.left.spaceInfo?.supported && panes.left.spaceInfo.totalSpace" class="omni-space-track">
+                  <div
+                    class="omni-space-fill"
+                    :style="{
+                      width: `${getSpacePercent(panes.left.spaceInfo)}%`,
+                      backgroundColor: getSpaceColor(panes.left.spaceInfo),
+                    }"
+                  />
+                </div>
               </div>
-              <div v-if="panes.left.spaceInfo?.supported && panes.left.spaceInfo.totalSpace" class="omni-space-track">
-                <div
-                  class="omni-space-fill"
-                  :style="{
-                    width: `${getSpacePercent(panes.left.spaceInfo)}%`,
-                    backgroundColor: getSpaceColor(panes.left.spaceInfo),
-                  }"
-                />
+              <div class="omni-sort-group">
+                <select v-model="panes.left.sortBy" class="omni-sort-select" title="排序字段" @change="handleSortChange('left')">
+                  <option value="name">名称</option>
+                  <option value="time">时间</option>
+                  <option value="size">大小</option>
+                </select>
+                <button
+                  type="button"
+                  class="omni-sort-dir-btn"
+                  :title="panes.left.sortOrder === 'asc' ? '当前升序，点击切换降序' : '当前降序，点击切换升序'"
+                  @click="toggleSortOrder('left')"
+                >
+                  {{ panes.left.sortOrder === 'asc' ? '↑' : '↓' }}
+                </button>
               </div>
             </div>
 
@@ -126,21 +143,6 @@
                   <label><input v-model="panes.left.filterMode" type="radio" value="keyword" /> 关键字</label>
                   <label><input v-model="panes.left.filterMode" type="radio" value="number" /> 选前N个</label>
                 </div>
-                <div class="omni-sort-group">
-                  <select v-model="panes.left.sortBy" class="omni-sort-select" title="排序字段" @change="handleSortChange('left')">
-                    <option value="name">名称</option>
-                    <option value="time">时间</option>
-                    <option value="size">大小</option>
-                  </select>
-                  <button
-                    type="button"
-                    class="omni-sort-dir-btn"
-                    :title="panes.left.sortOrder === 'asc' ? '当前升序，点击切换降序' : '当前降序，点击切换升序'"
-                    @click="toggleSortOrder('left')"
-                  >
-                    {{ panes.left.sortOrder === 'asc' ? '↑' : '↓' }}
-                  </button>
-                </div>
               </div>
 
               <div class="omni-tag-row">
@@ -184,28 +186,45 @@
               </div>
             </div>
 
-            <!-- 当前面板挂载存储容量信息 -->
-            <div v-if="panes.right.spaceInfo || panes.right.spaceLoading" class="omni-space-bar">
-              <div class="omni-space-meta">
-                <span class="omni-space-driver">
-                  💾 {{ panes.right.spaceLoading && !panes.right.spaceInfo ? '存储检测中' : formatDriverLabel(panes.right.spaceInfo?.driver) }}
-                  <template v-if="panes.right.spaceInfo?.mountPath"> · {{ panes.right.spaceInfo.mountPath }}</template>
-                </span>
-                <span v-if="panes.right.spaceInfo?.supported && panes.right.spaceInfo.totalSpace" class="omni-space-text">
-                  {{ formatSpaceSummary(panes.right.spaceInfo) }}
-                </span>
-                <span v-else-if="!panes.right.spaceLoading" class="omni-space-text omni-space-muted">
-                  未提供容量统计
-                </span>
+            <!-- 当前面板挂载存储容量信息 + 排序控件同一行 -->
+            <div class="omni-space-sort-row">
+              <div v-if="panes.right.spaceInfo || panes.right.spaceLoading" class="omni-space-bar">
+                <div class="omni-space-meta">
+                  <span class="omni-space-driver">
+                    💾 {{ panes.right.spaceLoading && !panes.right.spaceInfo ? '存储检测中' : formatDriverLabel(panes.right.spaceInfo?.driver) }}
+                    <template v-if="panes.right.spaceInfo?.mountPath"> · {{ panes.right.spaceInfo.mountPath }}</template>
+                  </span>
+                  <span v-if="panes.right.spaceInfo?.supported && panes.right.spaceInfo.totalSpace" class="omni-space-text">
+                    {{ formatSpaceSummary(panes.right.spaceInfo) }}
+                  </span>
+                  <span v-else-if="!panes.right.spaceLoading" class="omni-space-text omni-space-muted">
+                    未提供容量统计
+                  </span>
+                </div>
+                <div v-if="panes.right.spaceInfo?.supported && panes.right.spaceInfo.totalSpace" class="omni-space-track">
+                  <div
+                    class="omni-space-fill"
+                    :style="{
+                      width: `${getSpacePercent(panes.right.spaceInfo)}%`,
+                      backgroundColor: getSpaceColor(panes.right.spaceInfo),
+                    }"
+                  />
+                </div>
               </div>
-              <div v-if="panes.right.spaceInfo?.supported && panes.right.spaceInfo.totalSpace" class="omni-space-track">
-                <div
-                  class="omni-space-fill"
-                  :style="{
-                    width: `${getSpacePercent(panes.right.spaceInfo)}%`,
-                    backgroundColor: getSpaceColor(panes.right.spaceInfo),
-                  }"
-                />
+              <div class="omni-sort-group">
+                <select v-model="panes.right.sortBy" class="omni-sort-select" title="排序字段" @change="handleSortChange('right')">
+                  <option value="name">名称</option>
+                  <option value="time">时间</option>
+                  <option value="size">大小</option>
+                </select>
+                <button
+                  type="button"
+                  class="omni-sort-dir-btn"
+                  :title="panes.right.sortOrder === 'asc' ? '当前升序，点击切换降序' : '当前降序，点击切换升序'"
+                  @click="toggleSortOrder('right')"
+                >
+                  {{ panes.right.sortOrder === 'asc' ? '↑' : '↓' }}
+                </button>
               </div>
             </div>
 
@@ -270,21 +289,6 @@
                   <label><input v-model="panes.right.filterMode" type="radio" value="regex" /> 正则</label>
                   <label><input v-model="panes.right.filterMode" type="radio" value="keyword" /> 关键字</label>
                   <label><input v-model="panes.right.filterMode" type="radio" value="number" /> 选前N个</label>
-                </div>
-                <div class="omni-sort-group">
-                  <select v-model="panes.right.sortBy" class="omni-sort-select" title="排序字段" @change="handleSortChange('right')">
-                    <option value="name">名称</option>
-                    <option value="time">时间</option>
-                    <option value="size">大小</option>
-                  </select>
-                  <button
-                    type="button"
-                    class="omni-sort-dir-btn"
-                    :title="panes.right.sortOrder === 'asc' ? '当前升序，点击切换降序' : '当前降序，点击切换升序'"
-                    @click="toggleSortOrder('right')"
-                  >
-                    {{ panes.right.sortOrder === 'asc' ? '↑' : '↓' }}
-                  </button>
                 </div>
               </div>
 
@@ -2619,19 +2623,29 @@ onBeforeUnmount(() => {
   background: #e6f7ff;
 }
 
-/* 当前挂载存储容量条 */
+/* 当前挂载存储容量条与排序控件同一行 */
+.omni-space-sort-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
 .omni-space-bar {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
   background: #f8fafc;
   border: 1px solid #e2e8f0;
   border-radius: 6px;
   padding: 5px 10px;
-  margin-bottom: 8px;
   font-size: 12px;
   line-height: 1.3;
-  flex-shrink: 0;
 }
 
 .omni-space-meta {
@@ -2645,6 +2659,7 @@ onBeforeUnmount(() => {
 .omni-space-driver {
   color: #334155;
   font-weight: 600;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3797,6 +3812,18 @@ onBeforeUnmount(() => {
     gap: 6px !important;
     padding: 4px 6px !important;
     font-size: 11px !important;
+  }
+  .omni-space-sort-row {
+    gap: 6px !important;
+  }
+  .omni-space-bar {
+    padding: 4px 8px !important;
+    font-size: 11px !important;
+  }
+  .omni-sort-select,
+  .omni-sort-dir-btn {
+    font-size: 11px !important;
+    padding: 4px 6px !important;
   }
 
   /* 悬浮控制栏层级提升 */

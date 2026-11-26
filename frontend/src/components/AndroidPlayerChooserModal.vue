@@ -104,7 +104,6 @@ import {
 } from '@/utils/androidPlayer'
 import { openInBrowser } from '@/utils/openlist'
 
-const openListStore = useOpenListStore()
 const customPackage = ref('')
 const rememberAsDefault = ref(false)
 
@@ -157,6 +156,8 @@ function handleSelectPackage(pkg: string) {
   launchAndroidWithPackage(targetUrl, trimmedPkg, { sizeText, title, subUrls })
 
   if (shouldSaveDefault) {
+    // 延迟获取 store，避免 App 挂载于 Web 认证页时触发受保护的 /config/openlist 请求
+    const openListStore = useOpenListStore()
     void openListStore
       .saveConfig({ androidPackage: trimmedPkg })
       .then(() => {
