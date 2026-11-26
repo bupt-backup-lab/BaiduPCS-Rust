@@ -114,20 +114,19 @@
                   allow-create
                   default-first-option
                   clearable
-                  placeholder="留空：弹出系统播放器选择列表"
+                  placeholder="留空：每次打开前询问选择播放器"
                   style="width: 100%"
                 >
-                  <el-option label="弹出系统应用选择列表（推荐）" value="" />
-                  <el-option label="VLC for Android (org.videolan.vlc)" value="org.videolan.vlc" />
-                  <el-option label="MPV for Android (is.xyz.mpv)" value="is.xyz.mpv" />
-                  <el-option label="MX Player 免费版 (com.mxtech.videoplayer.ad)" value="com.mxtech.videoplayer.ad" />
-                  <el-option label="MX Player 专业版 (com.mxtech.videoplayer.pro)" value="com.mxtech.videoplayer.pro" />
-                  <el-option label="Just Player (com.brouken.player)" value="com.brouken.player" />
-                  <el-option label="Nova Video Player (org.courville.nova)" value="org.courville.nova" />
-                  <el-option label="Kodi (org.xbmc.kodi)" value="org.xbmc.kodi" />
+                  <el-option label="每次打开前询问选择播放器（推荐）" value="" />
+                  <el-option
+                    v-for="preset in ANDROID_PLAYER_PRESETS"
+                    :key="preset.pkg"
+                    :label="`${preset.name} (${preset.pkg})`"
+                    :value="preset.pkg"
+                  />
                 </el-select>
                 <div class="form-tip">
-                  留空时由 Android 弹出「打开方式」列表；填写包名（如 <code>org.videolan.vlc</code>）可直接静默唤起并支持外挂字幕。
+                  留空时每次播放前会在网页端弹出播放器选择窗口（规避 Firefox/Via/Brave 下系统 IntentResolver 无响应问题）；填写包名（如 <code>org.videolan.vlc</code>）可直接定向唤起并支持外挂字幕。
                 </div>
               </el-form-item>
             </el-col>
@@ -258,6 +257,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { ANDROID_PLAYER_PRESETS } from '@/utils/androidPlayer'
 import { Link, Check, Connection, User } from '@element-plus/icons-vue'
 import { useOpenListStore } from '@/stores/openlist'
 import { useAuthStore } from '@/stores/auth'

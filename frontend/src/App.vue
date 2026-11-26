@@ -11,6 +11,7 @@
     </transition>
 
     <router-view />
+    <AndroidPlayerChooserModal />
   </div>
 </template>
 
@@ -33,6 +34,7 @@ import { onMounted, onUnmounted } from 'vue'
 import { WarningFilled } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { getWebSocketClient } from '@/utils/websocket'
+import AndroidPlayerChooserModal from '@/components/AndroidPlayerChooserModal.vue'
 
 const authStore = useAuthStore()
 const wsClient = getWebSocketClient()

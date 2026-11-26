@@ -1,6 +1,7 @@
 import { ElMessage } from 'element-plus'
 import type { OpenListAccountMapping, OpenListConfig } from '@/types/openlist'
 import { refreshOpenListBackend, testOpenListBackend } from '@/api/config'
+import { launchAndroidWithPackage, openAndroidPlayerChooser } from './androidPlayer'
 
 export const MEDIA_EXT = /\.(mkv|mp4|avi|ts|m2ts|flv|wmv|mov|rmvb|webm|m4v|mpg|mpeg|mp3|flac|m4a|wav|aac|ogg|opus|ape|wma)$/i
 export const VIDEO_EXT = /\.(mkv|mp4|avi|ts|m2ts|flv|wmv|mov|rmvb|webm|m4v|mpg|mpeg)$/i
@@ -263,23 +264,13 @@ export function launchMpv(
   const ua = navigator.userAgent
 
   if (/Android/i.test(ua)) {
-    // Android 端：尝试通过 Intent 唤起移动端播放器
-    // 附加 S.subtitles_location 参数以便 VLC 等主流播放器自动加载字幕
-    let extra = ''
-    if (subUrls && subUrls.length > 0) {
-      extra += `S.subtitles_location=${encodeURIComponent(subUrls[0])};`
-    }
-    // 若指定了包名（如 org.videolan.vlc 或 is.xyz.mpv），则定向调起；
-    // 若未指定包名（留空），则不加 package= 参数，由 Android 系统弹出“打开方式”选择列表！
     const pkg = mobileConfig?.androidPackage?.trim()
-    const pkgPart = pkg ? `package=${encodeURIComponent(pkg)};` : ''
-    const urlScheme = /^https:\/\//i.test(url) ? 'https' : 'http'
-    const intent =
-      url.replace(/^https?:\/\//i, 'intent://') +
-      `#Intent;scheme=${urlScheme};action=android.intent.action.VIEW;type=video/*;${pkgPart}${extra}end;`
-    const appLabel = pkg ? `（${pkg}）` : '系统播放器选择列表'
-    ElMessage.info(`${head}正在唤起 ${appLabel}${sz}${subTip}...`)
-    window.location.href = intent
+    if (pkg) {
+      launchAndroidWithPackage(url, pkg, { sizeText: sz, title, subUrls })
+      return
+    }
+    // 未指定包名时改为每次打开前由网页端询问目标播放器，避免无 package= 的 intent:// 落入系统 IntentResolver 失效
+    openAndroidPlayerChooser({ url, size, sizeText: sz, title, subUrls })
     return
   }
 

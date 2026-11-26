@@ -87,12 +87,13 @@ desktopScheme = "mpvpcs"
 
 # 安卓移动端播放器包名（androidPackage）
 # 规则说明：
-# 1. 留空 ""（推荐）：点击播放时，安卓系统会弹出标准的“选择打开方式”弹窗，
-#    自动列出手机内所有支持播放的 App（VLC、MPV、MX Player 等），由您自主选择并可勾选“始终”。
-# 2. 填写具体包名：直接静默直达该 App，跳过系统选择弹窗。
+# 1. 留空 ""（推荐）：点击播放时每次打开前弹出网页端播放器选择窗，
+#    由您选择 VLC / MPV / MX Player 等或输入自定义包名后再附带 package= 精确唤起
+#    （避免无包名 intent:// 在 Firefox / Via / Brave 中被系统 IntentResolver 拦截无响应）。
+# 2. 填写具体包名：跳过询问弹窗，直接定向唤起该 App。
 #
 # 常见安卓播放器包名列表：
-# - ""                          : 弹出系统应用选择弹窗（由您随心选择）
+# - ""                          : 每次打开前弹窗选择播放器（推荐）
 # - "org.videolan.vlc"          : VLC for Android（强烈推荐，完美支持网络外挂字幕自动加载）
 # - "is.xyz.mpv"                : MPV for Android（原版 MPV）
 # - "com.mxtech.videoplayer.ad" : MX Player 免费版

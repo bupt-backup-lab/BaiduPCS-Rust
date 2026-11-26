@@ -10,7 +10,7 @@
 
 1. **OpenList 服务端配置与代理网关**：配置持久化于 `config/app.toml` 的 `[openlist]` 段，由 Rust 后端统一代理认证、目录刷新、文件系统操作和 TMDB 元数据请求，规避浏览器 CORS 限制并避免在前端暴露 OpenList 密码。
 2. **文件操作接管模式（`off` / `observe` / `on`）**：支持将网盘内的 `mkdir`、`rename`、`delete`、`move`、`copy` 五类同盘操作交由 OpenList 执行，顶栏提供一键切换标签，失败时支持一键回退 BaiduPCS 原生接口。
-3. **多端媒体直链播放与剧集连播**：支持桌面端自定义协议（如 `mpvpcs://`）、Android Intent（系统选择器或指定包名）、iOS URL Scheme（VLC / Infuse / nPlayer 等）以及浏览器直链打开；自动按 Jellyfin 规范匹配同目录外挂字幕，并提供悬浮剧集连播控制栏。
+3. **多端媒体直链播放与剧集连播**：支持桌面端自定义协议（如 `mpvpcs://`）、Android Intent（未指定包名时每次打开前网页弹窗选择播放器，或按指定包名直达）、iOS URL Scheme（VLC / Infuse / nPlayer 等）以及浏览器直链打开；自动按 Jellyfin 规范匹配同目录外挂字幕，并提供悬浮剧集连播控制栏。
 4. **OpenList 双栏文件管理面板**：仿照经典双栏文件管理器（PC 左右分栏、移动端 A/B Tab 切换），支持跨栏复制/移动、扩展名标签快选、正则/关键字/前 N 项筛选，并内置三种高级整理工具：
    - **批量重命名**（正则 / 顺序递增 / 查找替换）
    - **智能影视重命名**（剧集/季度识别、拖拽排序、行内铅笔编辑、字幕后缀保留与实时冲突校验）
@@ -29,8 +29,10 @@
 | 后端接口 | `backend/src/server/handlers/openlist.rs` | 实现 `/config/openlist`、`/openlist/test`、`/openlist/refresh`、`/openlist/execute`、`/openlist/fs/call`、`/openlist/tmdb/proxy` 代理接口，内置连接池复用、401 自动重新登录与 `not found` 刷新重试。 |
 | 前端类型 | `frontend/src/types/openlist.ts` | 定义 `OpenListConfig`、`OpenListAccountMapping`、`OpenListTakeoverMode`、`OpenListExecuteOpRequest` 等 TypeScript 类型。 |
 | 前端状态 | `frontend/src/stores/openlist.ts` | Pinia store（`useOpenListStore`），负责加载/保存 `[openlist]` 配置（后端 `app.toml` 为主、`localStorage` 降级缓存）及切换接管模式。 |
+| 前端工具 | `frontend/src/utils/androidPlayer.ts` | 安卓播放器预设清单、Intent URL 构造（附带 `package=` 与 `S.subtitles_location`）、每次打开前选择弹窗状态控制及剪贴板兼容复制。 |
 | 前端工具 | `frontend/src/utils/openlist.ts` | 账号挂载点解析、OpenList 直链/目录链接生成、多端播放器唤起（`launchMpv`）、Jellyfin 同名字幕匹配（`findMatchingSubtitles`）、剧集智能识别与上下集推导（`findNeighborEpisode` / `getEpisodeInfo`）。 |
 | 前端接管 | `frontend/src/utils/openlistTakeover.ts` | 统一拦截网盘原生写操作（`handleTakeoverOperation`），按 `off` / `observe` / `on` 模式分流并处理失败回退确认。 |
+| 前端组件 | `frontend/src/components/AndroidPlayerChooserModal.vue` | 安卓未指定默认播放器时每次播放前弹出的播放器选择弹窗（支持常见播放器包名、自定义包名、浏览器打开、复制直链及可选“设为默认”）。 |
 | 前端组件 | `frontend/src/components/EpisodePlayerBar.vue` | 右下角悬浮剧集连播控制栏（支持上一集、下一集、复制直链、重播、关闭）。 |
 | 前端组件 | `frontend/src/components/FileTypeIcon.vue` | 多类型彩色扁平 SVG 文件图标组件（区分文件夹、视频、音频、图片、压缩包、字幕、文档、代码、安装包、种子、电子书等）。 |
 | 前端工具 | `frontend/src/utils/fileIcon.ts` | 文件扩展名与类型分类识别工具（`getFileCategory`）。 |
@@ -50,6 +52,7 @@
 | 修改 | `backend/src/server/handlers/mod.rs` | 注册并导出 `handlers::openlist`。 |
 | 修改 | `backend/src/server/handlers/config.rs` | 在全局 `PUT /api/v1/config` 更新时保留 `openlist` 配置段，防止旧请求体意外将其覆盖为默认值。 |
 | 修改 | `config/app.toml.example` | 补充 `[openlist]` 完整配置示例与各平台播放器说明。 |
+| 修改 | `frontend/src/App.vue` | 全局挂载 `AndroidPlayerChooserModal` 选择弹窗。 |
 | 修改 | `frontend/src/api/config.ts` | 新增 `getOpenListConfig`、`updateOpenListConfig`、`testOpenListBackend`、`refreshOpenListBackend`、`executeOpenListOpBackend`、`callOpenListFsBackend`、`proxyTmdbBackend`、`getOpenListSpaceBackend` API 封装。 |
 | 修改 | `frontend/src/api/file.ts` | 将 `createFolder`、`deleteFiles`、`copyFiles`、`moveFiles`、`renameFile` 接入 `handleTakeoverOperation` 接管拦截层。 |
 | 修改 | `frontend/src/components/CrossAccountTransferDialog.vue` | 在移动模式开启 OpenList 删源接管时显示对应的接管提示。 |
@@ -108,9 +111,9 @@
 #### 多端播放策略（`launchMpv`）
 
 - **桌面端（Windows / macOS / Linux）**：将 `http(s)://` 替换为自定义协议（默认 `mpvpcs://`），若匹配到同目录字幕，将字幕直链作为 `?sub=...` 查询参数拼接到链接末尾，供本地协议处理脚本转换为播放器 `--sub-file` 参数。
-- **Android 端**：构造 `intent://...#Intent;scheme=...;action=android.intent.action.VIEW;type=video/*;...` 唤起本地播放器，并附带首个匹配字幕的 `S.subtitles_location` 参数：
-  - `androidPackage` 留空：不指定 `package=`，由 Android 系统弹出「打开方式」应用列表供用户自由选择。
-  - 填写包名（如 `org.videolan.vlc`、`is.xyz.mpv`、`com.mxtech.videoplayer.ad` 等）：直接静默直达对应播放器。
+- **Android 端**：构造 `intent://...#Intent;scheme=...;action=android.intent.action.VIEW;type=video/*;package=...` 唤起本地播放器，并附带首个匹配字幕的 `S.subtitles_location` 参数：
+  - `androidPackage` 留空：每次打开前弹出网页端「选择安卓播放器」弹窗（兼容 Firefox / Via / Brave，规避无 `package=` 时落入系统 `IntentResolver` 导致无法响应的问题），支持一键选择常用播放器、填写自定义包名、浏览器直接播放、复制直链及可选“设为默认播放器”。
+  - 填写包名（如 `org.videolan.vlc`、`is.xyz.mpv`、`com.mxtech.videoplayer.ad` 等）：跳过询问弹窗，直接带 `package=` 静默直达对应播放器。
 - **iOS 端**：根据 `iosScheme` 构造对应回调链接（支持 `vlc`、`infuse`、`nplayer-https`、`vidhub`、`fileball` 或自定义 Scheme），其中 `vlc` 与 `infuse` 支持自动附带 `&sub=` 外挂字幕参数；留空时使用浏览器新标签页播放。
 
 #### 同目录外挂字幕自动匹配（`findMatchingSubtitles`）
