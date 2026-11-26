@@ -44,13 +44,15 @@
 | 状态 | 文件路径 | 变更内容 |
 | :--- | :--- | :--- |
 | 修改 | `backend/src/config/mod.rs` | 注册 `pub mod openlist`，并在 `AppConfig` 中新增 `openlist: OpenListConfig` 字段。 |
+| 修改 | `backend/src/cross_account/mod.rs` | 跨账号移动最后一步「删除源文件」支持接入 OpenList 接管模式（受 `crossAccountDeleteTakeover` 开关控制，失败自动回退原生删除）。 |
 | 修改 | `backend/src/lib.rs` | 导出 `OpenListAccountMapping`、`OpenListConfig`。 |
-| 修改 | `backend/src/main.rs` | 注册 6 条 OpenList 配置与代理路由。 |
+| 修改 | `backend/src/main.rs` | 注册 7 条 OpenList 配置与代理路由（含 `/openlist/space` 存储容量查询接口）。 |
 | 修改 | `backend/src/server/handlers/mod.rs` | 注册并导出 `handlers::openlist`。 |
 | 修改 | `backend/src/server/handlers/config.rs` | 在全局 `PUT /api/v1/config` 更新时保留 `openlist` 配置段，防止旧请求体意外将其覆盖为默认值。 |
 | 修改 | `config/app.toml.example` | 补充 `[openlist]` 完整配置示例与各平台播放器说明。 |
-| 修改 | `frontend/src/api/config.ts` | 新增 `getOpenListConfig`、`updateOpenListConfig`、`testOpenListBackend`、`refreshOpenListBackend`、`executeOpenListOpBackend`、`callOpenListFsBackend`、`proxyTmdbBackend` API 封装。 |
+| 修改 | `frontend/src/api/config.ts` | 新增 `getOpenListConfig`、`updateOpenListConfig`、`testOpenListBackend`、`refreshOpenListBackend`、`executeOpenListOpBackend`、`callOpenListFsBackend`、`proxyTmdbBackend`、`getOpenListSpaceBackend` API 封装。 |
 | 修改 | `frontend/src/api/file.ts` | 将 `createFolder`、`deleteFiles`、`copyFiles`、`moveFiles`、`renameFile` 接入 `handleTakeoverOperation` 接管拦截层。 |
+| 修改 | `frontend/src/components/CrossAccountTransferDialog.vue` | 在移动模式开启 OpenList 删源接管时显示对应的接管提示。 |
 | 修改 | `frontend/src/layouts/MainLayout.vue` | 在顶栏右侧增加 `OL·关闭` / `OL·观察` / `OL·接管` 快捷状态胶囊，点击可循环切换模式。 |
 | 修改 | `frontend/src/views/FilesView.vue` | 工具栏新增「跳转OL」「刷新OL」「双栏管理」按钮；右键菜单新增「MPV 播放」「浏览器打开」「复制 OpenList 链接」；挂载 `EpisodePlayerBar` 与 `OpenListDualPaneModal`；接入 `FileTypeIcon` 多类型彩色图标并修复 `<el-table>` 残留灰行悬浮问题；优化移动端工具栏与卡片间距。 |
 | 修改 | `frontend/src/views/SettingsView.vue` | 引入 `OpenListSettingsSection` 并在左侧设置导航增加「OpenList 联动」锚点。 |
@@ -86,6 +88,7 @@
 | `POST /openlist/execute` | 执行操作接管 | 支持 `mkdir` / `rename` / `delete` / `move` / `copy`；按父目录或 `(src_dir, dst_dir)` 自动分组批处理，内置 401 自动重新登录和 `not found` 刷缓存重试。 |
 | `POST /openlist/fs/call` | 通用 `/api/fs/*` 代理 | 供双栏管理面板调用（如 `/api/fs/list`、`/api/fs/batch_rename` 等），校验路径仅允许 `/api/fs/` 或 `/api/public/` 前缀并拦截路径穿越。 |
 | `POST /openlist/tmdb/proxy` | TMDB API 请求代理 | 仅允许代理 `https://api.themoviedb.org/` 请求，解决浏览器端跨域及网络环境访问问题。 |
+| `POST /openlist/space` | 查询挂载存储容量 | 按路径依次从 `/api/fs/list`、`/api/fs/get` 及（管理员权限时）`/api/admin/storage/list` 探测驱动类型与 `totalSpace` / `usedSpace` / `freeSpace`（兼容任意 OpenList 存储驱动）。 |
 
 ### 3.3 文件操作接管模式（`off` / `observe` / `on`）
 
@@ -96,6 +99,7 @@
 - **`on`（接管模式）**：直接通过 `/openlist/execute` 由 OpenList 执行，同时自动刷新目录缓存。
   - **自动回退规则**：若当前账号未配置挂载点，或在移动/复制的同时进行了重命名（OpenList 无法一步完成），会自动退回 BaiduPCS 原生接口。
   - **异常兜底**：若 OpenList 返回失败，前端会弹窗询问是否改用 BaiduPCS 原生方式重试该次操作。
+- **跨账号移动删除源文件接管**：在后端 `cross_account::delete_source` 中，当 `openlist.enabled`、`takeoverMode === 'on'` 且设置页中的 `crossAccountDeleteTakeover` 开启时，核对目标与源一致后优先调用 OpenList `/api/fs/remove` 删除源账号文件；若源账号未映射或 OpenList 删除失败，自动回退 BaiduPCS 原生删除并记录提示。
 
 顶栏右侧的 `OL·关闭` / `OL·观察` / `OL·接管` 胶囊支持点击一键循环切换并持久化保存到后端。
 
@@ -125,6 +129,7 @@
 
 - **双栏浏览与跨栏操作**：
   - 左侧面板 A、右侧面板 B 各自独立导航、刷新、新建文件夹，支持「同步路径给对侧」。
+  - 左右面板顶部分别展示各自当前挂载网盘的存储容量条（通过 `/openlist/space` 或 `/api/fs/list` 元数据获取，支持百度网盘及其他所有 OpenList 存储驱动，同挂载点子目录切换自动复用缓存）。
   - 移动端自动切换为顶部 A / B Tab 视图，底部显示操作方向提示（`A → B` 或 `B → A`），上下文菜单自动适应为底部抽屉样式。
   - 支持按 **正则**、**关键字**、**选前 N 个** 筛选勾选，以及按文件扩展名标签（如 `.mkv (12/12)`）一键反选/全选，并配有双栏内嵌删除确认框。
 - **批量重命名**：
