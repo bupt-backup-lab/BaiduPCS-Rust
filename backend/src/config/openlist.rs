@@ -57,6 +57,9 @@ pub struct OpenListConfig {
     /// 开启接管后，同网盘内的新建文件夹/重命名/删除/移动/复制 操作将改由 OpenList 执行
     #[serde(default = "default_takeover_mode", alias = "takeoverMode")]
     pub takeover_mode: String,
+    /// 开启接管模式时，跨账号移动最后一步「删除源文件」是否也交由 OpenList 执行
+    #[serde(default = "default_true", alias = "crossAccountDeleteTakeover")]
+    pub cross_account_delete_takeover: bool,
     /// 账号挂载路径映射表：百度用户名或 UID -> 挂载配置
     #[serde(default)]
     pub accounts: HashMap<String, OpenListAccountMapping>,
@@ -87,6 +90,7 @@ impl Default for OpenListConfig {
             auto_mount_by_username: true,
             fallback_mount: String::new(),
             takeover_mode: default_takeover_mode(),
+            cross_account_delete_takeover: true,
             accounts: HashMap::new(),
         }
     }

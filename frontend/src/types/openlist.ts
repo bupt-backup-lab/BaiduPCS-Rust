@@ -37,8 +37,19 @@ export interface OpenListConfig {
   fallbackMount: string
   /** 操作接管模式: "off" (关闭), "observe" (观察), "on" (接管) */
   takeoverMode: OpenListTakeoverMode
+  /** 开启接管模式时，跨账号移动最后一步「删除源文件」是否也交由 OpenList 执行 */
+  crossAccountDeleteTakeover?: boolean
   /** 账号挂载路径映射表：百度用户名或 UID -> 挂载配置 */
   accounts: Record<string, OpenListAccountMapping>
+}
+
+export interface OpenListSpaceInfo {
+  supported: boolean
+  driver: string
+  mountPath: string
+  totalSpace: number | null
+  usedSpace: number | null
+  freeSpace: number | null
 }
 
 export interface OpenListFileOpItem {

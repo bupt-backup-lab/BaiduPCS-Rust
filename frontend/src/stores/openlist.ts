@@ -18,6 +18,7 @@ const DEFAULT_CONFIG: OpenListConfig = {
   autoMountByUsername: true,
   fallbackMount: '',
   takeoverMode: 'observe',
+  crossAccountDeleteTakeover: true,
   accounts: {},
 }
 

@@ -606,6 +606,7 @@ import type {
   OpenListConfig,
   OpenListExecuteOpRequest,
   OpenListExecuteOpResponse,
+  OpenListSpaceInfo,
 } from '@/types/openlist'
 
 /**
@@ -679,6 +680,13 @@ export async function proxyTmdbBackend<T = any>(
     url,
     token,
   }, { timeout: 20000 })
+}
+
+/**
+ * 后端代理获取 OpenList 路径所属挂载存储的驱动与容量信息
+ */
+export async function getOpenListSpaceBackend(path: string): Promise<OpenListSpaceInfo> {
+  return apiClient.post('/openlist/space', { path }, { timeout: 20000 })
 }
 
 

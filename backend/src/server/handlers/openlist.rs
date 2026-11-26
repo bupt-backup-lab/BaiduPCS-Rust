@@ -37,6 +37,8 @@ pub struct OpenListConfigResponse {
     pub fallback_mount: String,
     #[serde(rename = "takeoverMode")]
     pub takeover_mode: String,
+    #[serde(rename = "crossAccountDeleteTakeover")]
+    pub cross_account_delete_takeover: bool,
     pub accounts: HashMap<String, OpenListAccountMapping>,
 }
 
@@ -64,6 +66,8 @@ pub struct OpenListConfigUpdateRequest {
     pub fallback_mount: String,
     #[serde(default, alias = "takeoverMode")]
     pub takeover_mode: Option<String>,
+    #[serde(default, alias = "crossAccountDeleteTakeover")]
+    pub cross_account_delete_takeover: Option<bool>,
     #[serde(default)]
     pub accounts: HashMap<String, OpenListAccountMapping>,
 }
@@ -96,6 +100,7 @@ pub async fn get_openlist_config(
         auto_mount_by_username: cfg.auto_mount_by_username,
         fallback_mount: cfg.fallback_mount,
         takeover_mode: cfg.takeover_mode,
+        cross_account_delete_takeover: cfg.cross_account_delete_takeover,
         accounts: cfg.accounts,
     })))
 }
@@ -146,6 +151,9 @@ pub async fn update_openlist_config(
         auto_mount_by_username: req.auto_mount_by_username,
         fallback_mount: req.fallback_mount.trim().to_string(),
         takeover_mode,
+        cross_account_delete_takeover: req
+            .cross_account_delete_takeover
+            .unwrap_or(guard.openlist.cross_account_delete_takeover),
         accounts: req.accounts,
     };
 
@@ -170,6 +178,7 @@ pub async fn update_openlist_config(
         auto_mount_by_username: new_openlist.auto_mount_by_username,
         fallback_mount: new_openlist.fallback_mount,
         takeover_mode: new_openlist.takeover_mode,
+        cross_account_delete_takeover: new_openlist.cross_account_delete_takeover,
         accounts: new_openlist.accounts,
     })))
 }
@@ -650,6 +659,88 @@ pub struct OpenListFileOpItem {
     pub newname: Option<String>,
 }
 
+/// 通过 OpenList 删除指定账号的一组网盘路径（按父目录分组调用 `/api/fs/remove`）
+pub async fn delete_paths_via_openlist(
+    cfg: &OpenListConfig,
+    uid: Option<u64>,
+    username: Option<&str>,
+    paths: &[String],
+) -> Result<usize, ApiError> {
+    if !cfg.enabled {
+        return Err(ApiError::BadRequest("未启用 OpenList 联动".to_string()));
+    }
+    if cfg.base_url.is_empty() {
+        return Err(ApiError::BadRequest("未配置 OpenList 服务网址".to_string()));
+    }
+    if cfg.username.is_empty() || cfg.password.is_empty() {
+        return Err(ApiError::BadRequest(
+            "未配置 OpenList 账号密码（执行删除操作需要写入/删除权限的专用账号）".to_string(),
+        ));
+    }
+    if paths.is_empty() {
+        return Err(ApiError::BadRequest("删除列表不能为空".to_string()));
+    }
+
+    let (base_url, mount_path, root_path) = resolve_account_mount(cfg, uid, username)?;
+    let client = openlist_http_client();
+    let mut token = login_and_get_token(client, &base_url, &cfg.username, &cfg.password).await?;
+
+    delete_paths_with_session(
+        client,
+        &base_url,
+        &mount_path,
+        &root_path,
+        &mut token,
+        &cfg.username,
+        &cfg.password,
+        paths,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn delete_paths_with_session(
+    client: &reqwest::Client,
+    base_url: &str,
+    mount_path: &str,
+    root_path: &str,
+    token: &mut String,
+    username: &str,
+    password: &str,
+    paths: &[String],
+) -> Result<usize, ApiError> {
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    for p in paths {
+        let (parent, name) = split_parent_and_name(p);
+        groups.entry(parent).or_default().push(name);
+    }
+
+    let mut deleted_count = 0;
+    for (parent, names) in groups {
+        let ol_dir = to_openlist_path(mount_path, root_path, &parent)?;
+        let body = serde_json::json!({
+            "dir": ol_dir,
+            "names": names,
+        });
+
+        call_openlist_api(
+            client,
+            base_url,
+            "/api/fs/remove",
+            token,
+            username,
+            password,
+            &body,
+            Some(&ol_dir),
+        )
+        .await?;
+
+        deleted_count += names.len();
+    }
+
+    Ok(deleted_count)
+}
+
 /// POST /openlist/execute 操作接管执行请求体
 #[derive(Debug, Deserialize)]
 pub struct OpenListExecuteOpRequest {
@@ -798,35 +889,17 @@ pub async fn execute_openlist_op(
                 return Err(ApiError::BadRequest("删除列表不能为空".to_string()));
             }
 
-            // 按父目录归类
-            let mut groups: HashMap<String, Vec<String>> = HashMap::new();
-            for p in &paths {
-                let (parent, name) = split_parent_and_name(p);
-                groups.entry(parent).or_default().push(name);
-            }
-
-            let mut deleted_count = 0;
-            for (parent, names) in groups {
-                let ol_dir = to_openlist_path(&mount_path, &root_path, &parent)?;
-                let body = serde_json::json!({
-                    "dir": ol_dir,
-                    "names": names,
-                });
-
-                call_openlist_api(
-                    &client,
-                    &base_url,
-                    "/api/fs/remove",
-                    &mut token,
-                    &cfg.username,
-                    &cfg.password,
-                    &body,
-                    Some(&ol_dir),
-                )
-                .await?;
-
-                deleted_count += names.len();
-            }
+            let deleted_count = delete_paths_with_session(
+                client,
+                &base_url,
+                &mount_path,
+                &root_path,
+                &mut token,
+                &cfg.username,
+                &cfg.password,
+                &paths,
+            )
+            .await?;
 
             let desc = format!("删除 {} 项文件/文件夹", deleted_count);
             Ok(Json(ApiResponse::success(OpenListExecuteOpResponse {
@@ -1036,6 +1109,221 @@ pub async fn openlist_tmdb_proxy(
     Ok(Json(ApiResponse::success(json)))
 }
 
+/// POST /openlist/space
+/// 获取指定 OpenList 路径所属挂载存储的驱动类型与容量统计（兼容百度网盘及其他所有 OpenList 驱动）
+#[derive(Debug, Deserialize)]
+pub struct OpenListSpaceRequest {
+    #[serde(default = "default_root_path")]
+    pub path: String,
+}
+
+fn default_root_path() -> String {
+    "/".to_string()
+}
+
+#[derive(Debug, Serialize, Default, PartialEq, Eq)]
+pub struct OpenListSpaceResponse {
+    pub supported: bool,
+    pub driver: String,
+    #[serde(rename = "mountPath")]
+    pub mount_path: String,
+    #[serde(rename = "totalSpace")]
+    pub total_space: Option<u64>,
+    #[serde(rename = "usedSpace")]
+    pub used_space: Option<u64>,
+    #[serde(rename = "freeSpace")]
+    pub free_space: Option<u64>,
+}
+
+fn positive_u64(val: Option<&serde_json::Value>) -> Option<u64> {
+    val.and_then(|v| v.as_i64()).filter(|&n| n > 0).map(|n| n as u64)
+}
+
+fn non_negative_u64(val: Option<&serde_json::Value>) -> Option<u64> {
+    val.and_then(|v| v.as_i64()).filter(|&n| n >= 0).map(|n| n as u64)
+}
+
+fn extract_space_fields(val: &serde_json::Value) -> (String, Option<u64>, Option<u64>, Option<u64>) {
+    let md = val.get("mount_details").unwrap_or(val);
+    let driver = md
+        .get("driver_name")
+        .or_else(|| val.get("driver"))
+        .or_else(|| val.get("provider"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let total = positive_u64(md.get("total_space"));
+    let free = non_negative_u64(md.get("free_space"));
+    let used = non_negative_u64(md.get("used_space")).or_else(|| match (total, free) {
+        (Some(t), Some(f)) if t >= f => Some(t - f),
+        _ => None,
+    });
+
+    (driver, total, used, free)
+}
+
+fn normalize_mount_prefix(p: &str) -> String {
+    let trimmed = p.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        "/".to_string()
+    } else {
+        format!("/{}", trimmed.trim_matches('/'))
+    }
+}
+
+fn match_storage_for_path(storages: &[serde_json::Value], req_path: &str) -> Option<(String, serde_json::Value)> {
+    let target = normalize_mount_prefix(req_path);
+    let mut best: Option<(usize, String, serde_json::Value)> = None;
+
+    for item in storages {
+        let Some(mp_raw) = item.get("mount_path").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let mp = normalize_mount_prefix(mp_raw);
+        let matched = if mp == "/" {
+            true
+        } else {
+            target == mp || target.starts_with(&format!("{}/", mp))
+        };
+        if matched {
+            let score = mp.len();
+            if best.as_ref().map(|b| score > b.0).unwrap_or(true) {
+                best = Some((score, mp, item.clone()));
+            }
+        }
+    }
+
+    best.map(|(_, mp, item)| (mp, item))
+}
+
+pub async fn get_openlist_space(
+    State(app_state): State<AppState>,
+    Json(req): Json<OpenListSpaceRequest>,
+) -> ApiResult<Json<ApiResponse<OpenListSpaceResponse>>> {
+    let cfg = app_state.config.read().await.openlist.clone();
+
+    if !cfg.enabled {
+        return Err(ApiError::BadRequest("未启用 OpenList 联动".to_string()));
+    }
+    if cfg.base_url.is_empty() {
+        return Err(ApiError::BadRequest("未配置 OpenList 服务网址".to_string()));
+    }
+    if cfg.username.is_empty() || cfg.password.is_empty() {
+        return Err(ApiError::BadRequest("未配置 OpenList 账号密码".to_string()));
+    }
+
+    let base_url = cfg.base_url.trim().trim_end_matches('/').to_string();
+    let client = openlist_http_client();
+    let mut token = login_and_get_token(client, &base_url, &cfg.username, &cfg.password).await?;
+
+    let req_path = normalize_mount_prefix(&req.path);
+    let mut result = OpenListSpaceResponse {
+        mount_path: req_path.clone(),
+        ..Default::default()
+    };
+
+    // 1. 先从 /api/fs/list 获取当前目录的 provider 与 mount_details（普通账号权限即可）
+    if let Ok(list_res) = call_openlist_api(
+        client,
+        &base_url,
+        "/api/fs/list",
+        &mut token,
+        &cfg.username,
+        &cfg.password,
+        &serde_json::json!({
+            "path": req_path,
+            "password": "",
+            "page": 1,
+            "per_page": 1,
+            "refresh": false,
+        }),
+        None,
+    )
+    .await
+    {
+        if let Some(data) = list_res.get("data") {
+            let (driver, total, used, free) = extract_space_fields(data);
+            if !driver.is_empty() {
+                result.driver = driver;
+            }
+            if total.is_some() {
+                result.supported = true;
+                result.total_space = total;
+                result.used_space = used;
+                result.free_space = free;
+            }
+        }
+    }
+
+    // 2. 若 /api/fs/list 未带出容量，再尝试 /api/fs/get
+    if !result.supported {
+        if let Ok(get_res) = call_openlist_api(
+            client,
+            &base_url,
+            "/api/fs/get",
+            &mut token,
+            &cfg.username,
+            &cfg.password,
+            &serde_json::json!({
+                "path": req_path,
+                "password": "",
+            }),
+            None,
+        )
+        .await
+        {
+            if let Some(data) = get_res.get("data") {
+                let (driver, total, used, free) = extract_space_fields(data);
+                if result.driver.is_empty() && !driver.is_empty() {
+                    result.driver = driver;
+                }
+                if total.is_some() {
+                    result.supported = true;
+                    result.total_space = total;
+                    result.used_space = used;
+                    result.free_space = free;
+                }
+            }
+        }
+    }
+
+    // 3. 兜底尝试 /api/admin/storage/list（若配置账号为管理员，可精准匹配挂载点、驱动和容量；非管理员静默跳过）
+    let storage_list_url = format!("{}/api/admin/storage/list?page=1&per_page=0", base_url);
+    if let Ok(resp) = client
+        .get(&storage_list_url)
+        .header("Authorization", token.as_str())
+        .send()
+        .await
+    {
+        if let Ok(json) = resp.json::<serde_json::Value>().await {
+            if json.get("code").and_then(|c| c.as_i64()) == Some(200) {
+                if let Some(arr) = json
+                    .get("data")
+                    .and_then(|d| d.get("content"))
+                    .and_then(|c| c.as_array())
+                {
+                    if let Some((matched_mount, item)) = match_storage_for_path(arr, &req_path) {
+                        result.mount_path = matched_mount;
+                        let (driver, total, used, free) = extract_space_fields(&item);
+                        if !driver.is_empty() {
+                            result.driver = driver;
+                        }
+                        if !result.supported && total.is_some() {
+                            result.supported = true;
+                            result.total_space = total;
+                            result.used_space = used;
+                            result.free_space = free;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::success(result)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1102,5 +1390,31 @@ mod tests {
         assert_eq!(b2, "https://openlist.example.com");
         assert_eq!(m2, "/alice");
         assert_eq!(r2, "/");
+    }
+
+    #[test]
+    fn test_extract_space_and_match_storage() {
+        let v = serde_json::json!({
+            "provider": "BaiduNetdisk",
+            "mount_details": {
+                "driver_name": "BaiduNetdisk",
+                "total_space": 5_000_000_000_000i64,
+                "free_space": 1_800_000_000_000i64
+            }
+        });
+        let (driver, total, used, free) = extract_space_fields(&v);
+        assert_eq!(driver, "BaiduNetdisk");
+        assert_eq!(total, Some(5_000_000_000_000));
+        assert_eq!(free, Some(1_800_000_000_000));
+        assert_eq!(used, Some(3_200_000_000_000));
+
+        let storages = vec![
+            serde_json::json!({ "mount_path": "/", "driver": "Virtual" }),
+            serde_json::json!({ "mount_path": "/HKU慕容", "driver": "BaiduNetdisk" }),
+            serde_json::json!({ "mount_path": "/HKU慕容/影视", "driver": "Local" }),
+        ];
+        let (mp, matched) = match_storage_for_path(&storages, "/HKU慕容/影视/电影").unwrap();
+        assert_eq!(mp, "/HKU慕容/影视");
+        assert_eq!(matched["driver"], "Local");
     }
 }

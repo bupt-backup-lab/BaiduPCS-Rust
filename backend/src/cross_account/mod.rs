@@ -419,7 +419,12 @@ async fn run_job(state: AppState, job: CrossAccountJob) {
                 Ok(()) => {
                     registry.set_stage(&id, CrossAccountStage::DeletingSource);
                     match delete_source(&state, source, &job.paths).await {
-                        Ok(()) => registry.update(&id, |j| j.source_deleted = true),
+                        Ok(fallback_note) => {
+                            registry.update(&id, |j| j.source_deleted = true);
+                            if let Some(note) = fallback_note {
+                                registry.warn(&id, note);
+                            }
+                        }
                         Err(msg) => registry.warn(
                             &id,
                             format!(
@@ -836,7 +841,7 @@ async fn revoke_share(state: &AppState, uid: Uid, shareid: u64) -> Result<(), St
     Err(last_err)
 }
 
-async fn delete_source(state: &AppState, uid: Uid, paths: &[String]) -> Result<(), String> {
+async fn delete_source_native(state: &AppState, uid: Uid, paths: &[String]) -> Result<(), String> {
     let mut warmed_up = false;
     loop {
         let Some(client) = state.client_pool.read().await.get_client(uid) else {
@@ -861,6 +866,65 @@ async fn delete_source(state: &AppState, uid: Uid, paths: &[String]) -> Result<(
             _ => resp.error.unwrap_or_else(|| "删除失败".to_string()),
         });
     }
+}
+
+async fn delete_source(
+    state: &AppState,
+    uid: Uid,
+    paths: &[String],
+) -> Result<Option<String>, String> {
+    let openlist_cfg = state.config.read().await.openlist.clone();
+
+    if openlist_cfg.enabled && openlist_cfg.cross_account_delete_takeover {
+        if openlist_cfg.takeover_mode == "on" {
+            let source_username = {
+                let am = state.account_manager.lock().await;
+                am.get_user(uid)
+                    .map(|u| u.username.clone())
+                    .filter(|s| !s.is_empty())
+            };
+
+            match crate::server::handlers::openlist::delete_paths_via_openlist(
+                &openlist_cfg,
+                Some(uid.raw()),
+                source_username.as_deref(),
+                paths,
+            )
+            .await
+            {
+                Ok(deleted) => {
+                    info!(
+                        "跨账号移动已通过 OpenList 接管删除源文件 (uid={}, count={})",
+                        uid.raw(),
+                        deleted
+                    );
+                    return Ok(None);
+                }
+                Err(err) => {
+                    let err_str = err.to_string();
+                    warn!(
+                        "跨账号移动 OpenList 删除源文件失败，回退原生删除 (uid={}): {}",
+                        uid.raw(),
+                        err_str
+                    );
+                    delete_source_native(state, uid, paths).await?;
+                    return Ok(Some(format!(
+                        "OpenList 接管删除源文件失败（{}），已自动回退 BaiduPCS 原生方式删除",
+                        err_str
+                    )));
+                }
+            }
+        } else if openlist_cfg.takeover_mode == "observe" {
+            info!(
+                "OpenList 观察模式：跨账号移动删除 {} 项源文件可由 OpenList 接管，当前仍由 BaiduPCS 原生执行 (uid={})",
+                paths.len(),
+                uid.raw()
+            );
+        }
+    }
+
+    delete_source_native(state, uid, paths).await?;
+    Ok(None)
 }
 
 /// 启动时撤销上次运行遗留的临时分享（进程中途退出 / 撤销失败）

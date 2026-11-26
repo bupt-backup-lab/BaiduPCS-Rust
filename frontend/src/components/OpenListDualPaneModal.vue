@@ -39,6 +39,31 @@
               </div>
             </div>
 
+            <!-- 当前面板挂载存储容量信息 -->
+            <div v-if="panes.left.spaceInfo || panes.left.spaceLoading" class="omni-space-bar">
+              <div class="omni-space-meta">
+                <span class="omni-space-driver">
+                  💾 {{ panes.left.spaceLoading && !panes.left.spaceInfo ? '存储检测中' : (panes.left.spaceInfo?.driver || 'OpenList 根目录') }}
+                  <template v-if="panes.left.spaceInfo?.mountPath"> · {{ panes.left.spaceInfo.mountPath }}</template>
+                </span>
+                <span v-if="panes.left.spaceInfo?.supported && panes.left.spaceInfo.totalSpace" class="omni-space-text">
+                  {{ formatSpaceSummary(panes.left.spaceInfo) }}
+                </span>
+                <span v-else-if="!panes.left.spaceLoading" class="omni-space-text omni-space-muted">
+                  未提供容量统计
+                </span>
+              </div>
+              <div v-if="panes.left.spaceInfo?.supported && panes.left.spaceInfo.totalSpace" class="omni-space-track">
+                <div
+                  class="omni-space-fill"
+                  :style="{
+                    width: `${getSpacePercent(panes.left.spaceInfo)}%`,
+                    backgroundColor: getSpaceColor(panes.left.spaceInfo),
+                  }"
+                />
+              </div>
+            </div>
+
             <div class="omni-path-container">
               <span class="omni-crumb" @click="navigateToPath('left', '/')">🏠 根目录</span>
               <template v-for="(crumb, idx) in getBreadcrumbs('left')" :key="crumb.fullPath">
@@ -141,6 +166,31 @@
                 <button class="tool-btn" @click="renderPane('right', true)">🔄 刷新</button>
                 <button class="tool-btn" @click="handleMkdir('right')">➕ 新建文件夹</button>
                 <button class="tool-btn" @click="syncPath('right', 'left')">📍 同步给左侧</button>
+              </div>
+            </div>
+
+            <!-- 当前面板挂载存储容量信息 -->
+            <div v-if="panes.right.spaceInfo || panes.right.spaceLoading" class="omni-space-bar">
+              <div class="omni-space-meta">
+                <span class="omni-space-driver">
+                  💾 {{ panes.right.spaceLoading && !panes.right.spaceInfo ? '存储检测中' : (panes.right.spaceInfo?.driver || 'OpenList 根目录') }}
+                  <template v-if="panes.right.spaceInfo?.mountPath"> · {{ panes.right.spaceInfo.mountPath }}</template>
+                </span>
+                <span v-if="panes.right.spaceInfo?.supported && panes.right.spaceInfo.totalSpace" class="omni-space-text">
+                  {{ formatSpaceSummary(panes.right.spaceInfo) }}
+                </span>
+                <span v-else-if="!panes.right.spaceLoading" class="omni-space-text omni-space-muted">
+                  未提供容量统计
+                </span>
+              </div>
+              <div v-if="panes.right.spaceInfo?.supported && panes.right.spaceInfo.totalSpace" class="omni-space-track">
+                <div
+                  class="omni-space-fill"
+                  :style="{
+                    width: `${getSpacePercent(panes.right.spaceInfo)}%`,
+                    backgroundColor: getSpaceColor(panes.right.spaceInfo),
+                  }"
+                />
               </div>
             </div>
 
@@ -756,7 +806,8 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import { callOpenListFsBackend, proxyTmdbBackend } from '@/api/config'
+import { callOpenListFsBackend, getOpenListSpaceBackend, proxyTmdbBackend } from '@/api/config'
+import type { OpenListSpaceInfo } from '@/types/openlist'
 import EpisodePlayerBar from '@/components/EpisodePlayerBar.vue'
 import FileTypeIcon from '@/components/FileTypeIcon.vue'
 import { useOpenListStore } from '@/stores/openlist'
@@ -889,6 +940,8 @@ interface PaneState {
   filterMode: 'regex' | 'keyword' | 'number'
   loading: boolean
   error: string | null
+  spaceInfo: OpenListSpaceInfo | null
+  spaceLoading: boolean
 }
 
 const props = defineProps<{
@@ -919,6 +972,8 @@ const panes = reactive<{ left: PaneState; right: PaneState }>({
     filterMode: 'regex',
     loading: false,
     error: null,
+    spaceInfo: null,
+    spaceLoading: false,
   },
   right: {
     path: '/',
@@ -928,8 +983,148 @@ const panes = reactive<{ left: PaneState; right: PaneState }>({
     filterMode: 'regex',
     loading: false,
     error: null,
+    spaceInfo: null,
+    spaceLoading: false,
   },
 })
+
+const spaceCache = reactive<Record<string, OpenListSpaceInfo>>({})
+const spacePending = new Map<string, Promise<OpenListSpaceInfo>>()
+
+function normalizeMount(p: string): string {
+  const parts = splitPath(p)
+  return parts.length === 0 ? '/' : '/' + parts.join('/')
+}
+
+function findCachedSpace(path: string, provider?: string): OpenListSpaceInfo | null {
+  const norm = normalizeMount(path)
+  let best: OpenListSpaceInfo | null = null
+  let bestLen = -1
+  for (const key of Object.keys(spaceCache)) {
+    const info = spaceCache[key]
+    const mp = normalizeMount(info.mountPath || key)
+    const matched = mp === '/' ? norm === '/' : norm === mp || norm.startsWith(mp + '/')
+    if (matched && mp.length > bestLen) {
+      if (provider && info.driver && info.driver !== provider) continue
+      best = info
+      bestLen = mp.length
+    }
+  }
+  return best
+}
+
+function formatSpaceBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  const i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(k)))
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(i >= 4 ? 2 : 1))} ${sizes[i]}`
+}
+
+function getSpacePercent(info: OpenListSpaceInfo): number {
+  if (!info.totalSpace || info.totalSpace <= 0) return 0
+  const used =
+    info.usedSpace ?? (info.freeSpace != null && info.totalSpace >= info.freeSpace ? info.totalSpace - info.freeSpace : 0)
+  return Math.min(100, Math.max(0, Math.round((used / info.totalSpace) * 100)))
+}
+
+function getSpaceColor(info: OpenListSpaceInfo): string {
+  const p = getSpacePercent(info)
+  if (p >= 90) return '#f56c6c'
+  if (p >= 70) return '#e6a23c'
+  return '#409eff'
+}
+
+function formatSpaceSummary(info: OpenListSpaceInfo): string {
+  if (!info.totalSpace) return ''
+  const used =
+    info.usedSpace ?? (info.freeSpace != null && info.totalSpace >= info.freeSpace ? info.totalSpace - info.freeSpace : null)
+  const free =
+    info.freeSpace ?? (used != null && info.totalSpace >= used ? info.totalSpace - used : null)
+  if (isMobile.value) {
+    return `${used != null ? formatSpaceBytes(used) : '-'} / ${formatSpaceBytes(info.totalSpace)}`
+  }
+  const freePart = free != null ? ` · 剩余 ${formatSpaceBytes(free)}` : ''
+  return `已用 ${used != null ? formatSpaceBytes(used) : '-'} / 总共 ${formatSpaceBytes(info.totalSpace)}${freePart}`
+}
+
+async function refreshPaneSpace(
+  side: 'left' | 'right',
+  path: string,
+  forceRefresh: boolean,
+  listData?: any
+) {
+  const provider = typeof listData?.provider === 'string' ? listData.provider : ''
+  const md = listData?.mount_details
+  if (md && typeof md.total_space === 'number' && md.total_space > 0) {
+    const total = md.total_space
+    const free = typeof md.free_space === 'number' && md.free_space >= 0 ? md.free_space : null
+    const used =
+      typeof md.used_space === 'number' && md.used_space >= 0
+        ? md.used_space
+        : free != null && total >= free
+        ? total - free
+        : null
+    const directInfo: OpenListSpaceInfo = {
+      supported: true,
+      driver: md.driver_name || provider || 'OpenList',
+      mountPath: normalizeMount(path),
+      totalSpace: total,
+      usedSpace: used,
+      freeSpace: free,
+    }
+    spaceCache[directInfo.mountPath] = directInfo
+    if (normalizeMount(panes[side].path) === normalizeMount(path)) {
+      panes[side].spaceInfo = directInfo
+      panes[side].spaceLoading = false
+    }
+    return
+  }
+
+  const norm = normalizeMount(path)
+  if (!forceRefresh) {
+    const cached = findCachedSpace(norm, provider || undefined)
+    if (cached) {
+      panes[side].spaceInfo = cached
+      return
+    }
+  }
+
+  panes[side].spaceLoading = true
+  try {
+    let reqPromise = !forceRefresh ? spacePending.get(norm) : undefined
+    if (!reqPromise) {
+      reqPromise = getOpenListSpaceBackend(norm).finally(() => {
+        spacePending.delete(norm)
+      })
+      spacePending.set(norm, reqPromise)
+    }
+    const info = await reqPromise
+    if (!info.driver && provider) {
+      info.driver = provider
+    }
+    const cacheKey = normalizeMount(info.mountPath || norm)
+    spaceCache[cacheKey] = info
+    if (normalizeMount(panes[side].path) === norm) {
+      panes[side].spaceInfo = info
+    }
+  } catch {
+    if (normalizeMount(panes[side].path) === norm && provider) {
+      panes[side].spaceInfo = {
+        supported: false,
+        driver: provider,
+        mountPath: norm,
+        totalSpace: null,
+        usedSpace: null,
+        freeSpace: null,
+      }
+    }
+  } finally {
+    if (normalizeMount(panes[side].path) === norm) {
+      panes[side].spaceLoading = false
+    }
+  }
+}
 
 // 监听打开弹窗
 watch(
@@ -998,6 +1193,7 @@ function getFilterPlaceholder(mode: 'regex' | 'keyword' | 'number') {
 }
 
 async function renderPane(side: 'left' | 'right', forceRefresh = false) {
+  const targetPath = panes[side].path
   panes[side].loading = true
   panes[side].error = null
   panes[side].selectedNames.clear()
@@ -1006,7 +1202,7 @@ async function renderPane(side: 'left' | 'right', forceRefresh = false) {
     const res = await callOpenListFsBackend<any>(
       '/api/fs/list',
       {
-        path: panes[side].path,
+        path: targetPath,
         password: '',
         page: 1,
         per_page: 0,
@@ -1032,6 +1228,7 @@ async function renderPane(side: 'left' | 'right', forceRefresh = false) {
         : a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
     )
     panes[side].items = list
+    void refreshPaneSpace(side, targetPath, forceRefresh, res?.data)
   } catch (err: any) {
     panes[side].error = err.message || '加载目录失败'
   } finally {
@@ -2281,6 +2478,62 @@ onBeforeUnmount(() => {
 }
 .tool-btn:hover {
   background: #e6f7ff;
+}
+
+/* 当前挂载存储容量条 */
+.omni-space-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 5px 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  line-height: 1.3;
+  flex-shrink: 0;
+}
+
+.omni-space-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.omni-space-driver {
+  color: #334155;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.omni-space-text {
+  color: #475569;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.omni-space-muted {
+  color: #94a3b8;
+}
+
+.omni-space-track {
+  width: 100%;
+  height: 4px;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.omni-space-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.25s ease, background-color 0.25s ease;
 }
 
 /* 路径面包屑 */

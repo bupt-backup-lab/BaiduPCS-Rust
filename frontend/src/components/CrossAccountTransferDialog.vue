@@ -67,6 +67,9 @@
             目标目录不能有同名的文件/文件夹（百度转存不会自动改名），开始前会先检查。
             <template v-if="mode === 'move'">
               移动仅在全部转存成功、且逐项核对目标与源的文件数和大小一致后，才删除源文件（进入源账号回收站）。
+              <template v-if="crossAccountDeleteByOpenList">
+                当前已开启 OpenList 接管：删除源文件步骤将优先通过 OpenList 执行（失败时自动回退原生）。
+              </template>
             </template>
           </template>
         </template>
@@ -182,6 +185,7 @@ import AccountSelect from '@/components/AccountSelect.vue'
 import NetdiskFolderPickerModal from '@/components/NetdiskFolderPickerModal.vue'
 import { FilePickerModal } from '@/components/FilePicker'
 import { useAuthStore } from '@/stores/auth'
+import { useOpenListStore } from '@/stores/openlist'
 import { useIsMobile } from '@/utils/responsive'
 import type { FileItem } from '@/api/file'
 import {
@@ -228,8 +232,16 @@ const MODE_LABELS: Record<CrossAccountMode, string> = {
 }
 
 const authStore = useAuthStore()
+const openListStore = useOpenListStore()
 const isMobile = useIsMobile()
 const router = useRouter()
+
+const crossAccountDeleteByOpenList = computed(
+  () =>
+    openListStore.config.enabled &&
+    openListStore.config.takeoverMode === 'on' &&
+    openListStore.config.crossAccountDeleteTakeover !== false
+)
 
 const visible = computed({
   get: () => props.modelValue,

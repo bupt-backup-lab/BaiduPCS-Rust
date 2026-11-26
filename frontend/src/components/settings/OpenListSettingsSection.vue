@@ -171,6 +171,17 @@
             </div>
           </el-form-item>
 
+          <el-form-item label="跨账号移动时接管删除源文件">
+            <el-switch
+              v-model="form.crossAccountDeleteTakeover"
+              active-text="开启接管"
+              inactive-text="仅走原生"
+            />
+            <div class="form-tip">
+              开启后，当上方处于「接管模式」时，跨账号移动完成校验后的最后一步「删除源文件」将优先交由 OpenList 执行（可降低原生删文件触发风控的概率；失败或未配置挂载点时自动回退 BaiduPCS 原生删除）。
+            </div>
+          </el-form-item>
+
           <!-- 账号挂载对应关系 -->
           <el-divider content-position="left">
             <el-icon><User /></el-icon> 百度账号 ↔ OpenList 存储挂载点对应表
@@ -268,6 +279,7 @@ const form = ref<OpenListConfig>({
   autoMountByUsername: true,
   fallbackMount: '',
   takeoverMode: 'observe',
+  crossAccountDeleteTakeover: true,
   accounts: {},
 })
 
@@ -353,6 +365,7 @@ async function handleSave() {
       desktopScheme: form.value.desktopScheme.trim() || 'mpvpcs',
       androidPackage: (form.value.androidPackage || '').trim(),
       iosScheme: (form.value.iosScheme || '').trim(),
+      crossAccountDeleteTakeover: form.value.crossAccountDeleteTakeover ?? true,
     })
     ElMessage.success('OpenList 联动配置已保存至 app.toml')
   } catch (e: any) {

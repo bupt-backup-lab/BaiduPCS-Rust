@@ -126,6 +126,9 @@ fallbackMount = ""
 # 开启接管后，同网盘内的新建文件夹/重命名/删除/移动/复制 操作将改由 OpenList 执行
 takeoverMode = "observe"
 
+# 开启接管模式时，跨账号移动最后一步「删除源文件」是否也交由 OpenList 执行
+crossAccountDeleteTakeover = true
+
 # 各百度账号在 OpenList 上的挂载路径映射（可选）
 # [openlist.accounts."12345678"]
 # mount = "/HKU慕容"
